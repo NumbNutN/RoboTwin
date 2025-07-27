@@ -48,6 +48,16 @@ PLANNER=$MPLIB_LOCATION/planner.py
 sed -i -E 's/(if np.linalg.norm\(delta_twist\) < 1e-4 )(or collide )(or not within_joint_limit:)/\1\3/g' $PLANNER
 
 echo "Installing Curobo ..."
+# Find CUDA installation
+if command -v nvcc &> /dev/null; then
+    CUDA_HOME_PATH=$(dirname $(dirname $(command -v nvcc)))
+    export CUDA_HOME=${CUDA_HOME_PATH}
+    echo "Found CUDA at ${CUDA_HOME}, setting CUDA_HOME."
+else
+    echo "ERROR: nvcc not found. Please install the NVIDIA CUDA Toolkit."
+    exit 1
+fi
+
 cd envs
 git clone https://github.com/NVlabs/curobo.git
 cd curobo

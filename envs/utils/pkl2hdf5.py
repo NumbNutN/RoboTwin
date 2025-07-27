@@ -1,7 +1,7 @@
+import cv2
 import h5py, pickle
 import numpy as np
 import os
-import cv2
 from collections.abc import Mapping, Sequence
 import shutil
 from .images_to_video import images_to_video
@@ -80,8 +80,47 @@ def pkl_files_to_hdf5_and_video(pkl_files, hdf5_path, video_path):
     for pkl_file_path in pkl_files:
         pkl_file = load_pkl_file(pkl_file_path)
         append_data_to_structure(data_list, pkl_file)
+    
+    # print("Keys in data_list['observation']:", data_list["observation"].keys())
 
-    images_to_video(np.array(data_list["observation"]["head_camera"]["rgb"]), out_path=video_path)
+    obs = data_list["observation"]
+    head_rgbs = np.array(obs["head_camera"]["rgb"])
+    left_rgbs = np.array(obs["left_camera"]["rgb"])
+    right_rgbs = np.array(obs["right_camera"]["rgb"])
+        
+    if head_rgbs.shape == left_rgbs.shape == right_rgbs.shape and len(head_rgbs) > 0:
+        combined_images = []
+        num_frames = len(head_rgbs)
+        
+        for i in range(num_frames):
+            head_img = head_rgbs[i]
+            left_img = left_rgbs[i]
+            right_img = right_rgbs[i]
+            
+            h, w, _ = head_img.shape
+            
+            new_h, new_w = h // 2, w // 2
+            
+            left_resized = cv2.resize(left_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            right_resized = cv2.resize(right_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            bottom_row = np.concatenate([left_resized, right_resized], axis=1)
+            
+            if bottom_row.shape[1] != w:
+                bottom_row = cv2.resize(bottom_row, (w, new_h), interpolation=cv2.INTER_AREA)
+            
+            final_h = h + new_h
+            combined_img = np.zeros((final_h, w, 3), dtype=head_img.dtype)
+            
+            combined_img[:h, :w] = head_img
+            combined_img[h:, :w] = bottom_row
+            
+            combined_images.append(combined_img)
+        
+        images_to_video(np.array(combined_images), out_path=video_path)
+    else:
+        images_to_video(head_rgbs, out_path=video_path)
+
 
     with h5py.File(hdf5_path, "w") as f:
         create_hdf5_from_dict(f, data_list)
