@@ -15,6 +15,30 @@ from multiprocessing import Pool
 import subprocess
 from datetime import datetime
 
+import shutil
+
+PROMPT_DICT = {
+
+    # fix joint
+    "handover_block": "Using both arms, using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
+    "hanging_mug": "Using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
+    "lift_pot": "Using both arms, lift the pot.",
+    "pick_diverse_bottles":"Using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
+    "stack_blocks_two":"Using both arms, there are two blocks on the table, the color of the blocks is red, green. Move the blocks to the center of the table, and stack the geen block on the red block.",
+    
+    # left/right arm
+    "grab_roller": "grab the roller on the table.",
+    "handover_mic": "grasp the microphone on the table and handover it to the other arm.",
+    "move_can_pot": "there is a can and a pot on the table, pick up the can and move it to beside the pot.",
+    "move_stapler_pad": "move the stapler to a colored mat.",
+    "open_laptop": "open the laptop.",
+    "place_a2b_left":"place object A on the left of object B.",
+    "turn_switch":"click the switch."
+
+    # special
+    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket.",
+}
+
 
 def get_prompt(task_name):
     return f'{task_name[0].lower()}{task_name[1:]}'
@@ -99,32 +123,54 @@ def rearrange_video_views(task_name, video_paths, dest_data_file_path, caption, 
 def rearrange_video_dataset(source_dataset_path, dest_dataset_path, fps=30):
     print(f"Rearrange {source_dataset_path} to {dest_dataset_path}")
     task_episode_info = defaultdict(list)
+
     os.makedirs(dest_dataset_path, exist_ok=True)
+    
     pool = Pool(8)
     jobs = []
+
+    # Level 1: Iterate through each task directory (e.g., 'grab_roller')
     for task_name in os.listdir(source_dataset_path):
-        if task_name == 'error':
+        source_task_path = os.path.join(source_dataset_path, task_name)
+        
+        if not os.path.isdir(source_task_path) or task_name == 'error':
             continue
-        os.makedirs(os.path.join(dest_dataset_path, task_name), exist_ok=True)
-        if not os.path.isdir(os.path.join(source_dataset_path, task_name)):
-            continue
-        for episode_dir in os.listdir(os.path.join(source_dataset_path, task_name)):
-            # if not qpos_file.endswith('.pt'):
-            #     continue
-            episode_idx = episode_dir.split('_')[1]
-            video_paths = os.path.join(source_dataset_path, task_name,f'episode_{episode_idx}','.mp4')
-            if not os.path.isfile(video_paths):
-                continue
-            file_name = f'episode_{episode_idx}.mp4'
-            qpos_file = os.path.join(source_dataset_path, task_name,f'episode_{episode_idx}_qpos.pt')
-            os.system(f'cp "{os.path.join(source_dataset_path, task_name, qpos_file)}" "{os.path.join(dest_dataset_path, task_name)}"')
-            dest_data_file_path = os.path.join(dest_dataset_path, task_name, file_name)
-            caption = ''
-            # rearrange_video_views(task_name, video_paths, dest_data_file_path, caption, fps)
-            jobs.append(pool.apply_async(rearrange_video_views, args=(task_name, video_paths, dest_data_file_path, caption, fps, episode_idx)))
-            # print(f"task_name {task_name} episode_idx {episode_idx} video_paths {video_paths} dest_data_file_path {dest_data_file_path}")
-        #     break
-        # break
+
+        dest_task_path = os.path.join(dest_dataset_path, task_name)
+        os.makedirs(dest_task_path, exist_ok=True)
+
+        # Get all files inside the source task directory
+        all_files_in_task = os.listdir(source_task_path)
+        # Filter to get only the video files, which will be our starting point
+        video_files = [f for f in all_files_in_task if f.endswith('.mp4')]
+
+        # Level 2: Iterate through the found video files
+        for video_filename in video_files:
+            # e.g., video_filename is 'episode0.mp4'
+            base_name = video_filename.rsplit('.', 1)[0] # base_name is 'episode0'
+            
+            # From the video's base name, construct the expected qpos filename
+            qpos_filename = f"{base_name}_qpos.pt"
+
+            # Check if the corresponding qpos file actually exists
+            if qpos_filename in all_files_in_task:
+                # We found a matching pair!
+                
+                # Define full paths for source files
+                source_video_path = os.path.join(source_task_path, video_filename)
+                source_qpos_path = os.path.join(source_task_path, qpos_filename)
+
+                # Copy the qpos file to the new destination
+                shutil.copy(source_qpos_path, dest_task_path)
+                
+                # Prepare arguments for the processing job
+                dest_data_file_path = os.path.join(dest_task_path, video_filename)
+                caption = ''
+                try:
+                    episode_idx = int(base_name.replace('episode', ''))
+                    jobs.append(pool.apply_async(rearrange_video_views, args=(task_name, source_video_path, dest_data_file_path, caption, fps, episode_idx)))
+                except (ValueError, IndexError):
+                    print(f"Warning: Could not parse episode index from '{base_name}'. Skipping.")
     pool.close()
     pool.join()
     num_errors = 0
@@ -202,6 +248,15 @@ dirs_list = [
 
 
 if __name__ == '__main__':
+    # 首先清除所有代理环境变量
+    proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'SOCKS_PROXY', 'socks_proxy']
+    for var in proxy_vars:
+        if var in os.environ:
+            print(f"Clearing proxy environment variable: {var}")
+            del os.environ[var]
+    
+    # 设置 OpenAI 环境变量
+    os.environ['DISABLE_PROXY'] = 'true'
     os.environ['OPENAI_API_BASE'] = 'https://pro.xiaoai.plus/v1'
     os.environ['OPENAI_API_KEY'] = 'sk-zV5Are9supT6lXicA9HTRh9LVQ00L1sCPDw7oxMOz3ErsWOY'
     
