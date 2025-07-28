@@ -21,12 +21,12 @@ import shutil
 PROMPT_DICT = {
 
     # fix joint
-    "grab_roller": "Using both arms,grab the roller on the table.",
-    "handover_block": "Using both arms, using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
-    "hanging_mug": "Using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
-    "lift_pot": "Using both arms, lift the pot.",
-    "pick_diverse_bottles":"Using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
-    "stack_blocks_two":"Using both arms, there are two blocks on the table, the color of the blocks is red, green. Move the blocks to the center of the table, and stack the geen block on the red block.",
+    "grab_roller": "using both arms, grab the roller on the table.",
+    "handover_block": "using both arms, using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
+    "hanging_mug": "using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
+    "lift_pot": "using both arms, lift the pot.",
+    "pick_diverse_bottles":"using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
+    
     
     # left/right arm
     "handover_mic": "grasp the microphone on the table and handover it to the other arm.",
@@ -35,6 +35,7 @@ PROMPT_DICT = {
     "open_laptop": "open the laptop.",
     "place_a2b_left":"place object A on the left of object B.",
     "turn_switch":"click the switch.",
+    "stack_blocks_two":"move the red blocks to the center of the table, and using another arm to stack the geen block on the red block.",
 
     # special
     "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket."
@@ -124,16 +125,18 @@ def rearrange_video_views(task_name, video_paths, dest_data_file_path, qpos_path
         else:
             left_right_tasks = [
                 "handover_mic", "move_can_pot", "move_stapler_pad", 
-                "open_laptop", "place_a2b_left", "turn_switch"
+                "open_laptop", "place_a2b_left", "turn_switch", "stack_blocks_two"
             ]
 
             if task_name in left_right_tasks:
                 try:
                     qpos_data = torch.load(qpos_path, map_location='cpu')
-                    left_std = qpos_data[:, :7].std(dim=0).sum().item()
-                    right_std = qpos_data[:, 7:].std(dim=0).sum().item()
+                    # Only analyze the first 30 frames
+                    data_subset = qpos_data[:30]
+                    left_std = data_subset[:, :7].std(dim=0).sum().item()
+                    right_std = data_subset[:, 7:].std(dim=0).sum().item()
                     
-                    prefix = "Using left arm, " if left_std > right_std else "Using right arm, "
+                    prefix = "using left arm, " if left_std > right_std else "using right arm, "
                     caption = prefix + base_caption
                 except Exception as e:
                     print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
@@ -142,7 +145,8 @@ def rearrange_video_views(task_name, video_paths, dest_data_file_path, qpos_path
             elif task_name == "place_bread_basket":
                 try:
                     qpos_data = torch.load(qpos_path, map_location='cpu')
-                    data_subset = qpos_data[:90]
+                    # Only analyze the first 30 frames
+                    data_subset = qpos_data[:30]
                     left_std = data_subset[:, :7].std(dim=0).sum().item()
                     right_std = data_subset[:, 7:].std(dim=0).sum().item()
                     
@@ -150,9 +154,9 @@ def rearrange_video_views(task_name, video_paths, dest_data_file_path, qpos_path
                     is_dual_arm = (left_std > MOVEMENT_THRESHOLD and right_std > MOVEMENT_THRESHOLD)
 
                     if is_dual_arm:
-                        caption = "Using both arms, simultaneously grab up two breads and put them in the basket."
+                        caption = "using both arms, simultaneously grab up two breads and put them in the basket."
                     else:  # Single arm
-                        prefix = "Using left arm, " if left_std > right_std else "Using right arm, "
+                        prefix = "using left arm, " if left_std > right_std else "using right arm, "
                         caption = prefix + "grab the bread and put it in the basket."
                 except Exception as e:
                     print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
