@@ -5,6 +5,7 @@ from tqdm import tqdm
 import json
 from collections import defaultdict
 import ffmpeg
+import torch
 
 import time
 
@@ -20,6 +21,7 @@ import shutil
 PROMPT_DICT = {
 
     # fix joint
+    "grab_roller": "Using both arms,grab the roller on the table.",
     "handover_block": "Using both arms, using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
     "hanging_mug": "Using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
     "lift_pot": "Using both arms, lift the pot.",
@@ -27,16 +29,15 @@ PROMPT_DICT = {
     "stack_blocks_two":"Using both arms, there are two blocks on the table, the color of the blocks is red, green. Move the blocks to the center of the table, and stack the geen block on the red block.",
     
     # left/right arm
-    "grab_roller": "grab the roller on the table.",
     "handover_mic": "grasp the microphone on the table and handover it to the other arm.",
     "move_can_pot": "there is a can and a pot on the table, pick up the can and move it to beside the pot.",
     "move_stapler_pad": "move the stapler to a colored mat.",
     "open_laptop": "open the laptop.",
     "place_a2b_left":"place object A on the left of object B.",
-    "turn_switch":"click the switch."
+    "turn_switch":"click the switch.",
 
     # special
-    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket.",
+    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket."
 }
 
 
@@ -88,7 +89,7 @@ def write_video(images, save_path, width=640, height=720, fps=30):
         print(f'{save_path}: {e}')
 
 
-def rearrange_video_views(task_name, video_paths, dest_data_file_path, caption, fps=30, episode_idx=0):
+def rearrange_video_views(task_name, video_paths, dest_data_file_path, qpos_path, use_api_caption, fps=30, episode_idx=0):
     print(f"Rearranging {task_name} episode {episode_idx} videos to {dest_data_file_path}")
     
     video = read_video(video_paths,640,720)
@@ -97,30 +98,74 @@ def rearrange_video_views(task_name, video_paths, dest_data_file_path, caption, 
         frames.append(frame)
     write_video(frames, dest_data_file_path, 640, 720, fps)
     
-    num_images_for_api = 6
-    select_every = len(frames) // num_images_for_api
-    images_for_api = [cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 100])[1].tobytes() for image in frames[::select_every]]
-    fail=0
-    while True:
-        try:
-            caption = generate_caption_with_concatenated_images(images_for_api, re.sub(r'^\d+_|_\d+$', '', task_name).replace('_', ' '))[0]
-            break
-        except Exception as e:
-            import openai
-            print(f"error occur: {e}")
-            print(f"current openai request base url is: {openai.base_url}")
-            fail += 1
-            print(f"fail time {fail} in task {task_name} episode {episode_idx}")
-            time.sleep(30*fail)
+    caption = ""
+    if use_api_caption:
+        num_images_for_api = 6
+        select_every = len(frames) // num_images_for_api if len(frames) > num_images_for_api else 1
+        images_for_api = [cv2.imencode('.jpg', image, [int(cv2.IMWRITE_JPEG_QUALITY), 100])[1].tobytes() for image in frames[::select_every]]
+        fail=0
+        while True:
+            try:
+                caption = generate_caption_with_concatenated_images(images_for_api, re.sub(r'^\d+_|_\d+$', '', task_name).replace('_', ' '))[0]
+                break
+            except Exception as e:
+                import openai
+                print(f"error occur: {e}")
+                print(f"current openai request base url is: {openai.base_url}")
+                fail += 1
+                print(f"fail time {fail} in task {task_name} episode {episode_idx}")
+                time.sleep(30*fail)
+    else:
+        # Generate caption from PROMPT_DICT
+        base_caption = PROMPT_DICT.get(task_name)
+        if base_caption is None:
+            print(f"Warning: Task '{task_name}' not in PROMPT_DICT. Caption will be empty.")
+            caption = ""
+        else:
+            left_right_tasks = [
+                "handover_mic", "move_can_pot", "move_stapler_pad", 
+                "open_laptop", "place_a2b_left", "turn_switch"
+            ]
+
+            if task_name in left_right_tasks:
+                try:
+                    qpos_data = torch.load(qpos_path, map_location='cpu')
+                    left_std = qpos_data[:, :7].std(dim=0).sum().item()
+                    right_std = qpos_data[:, 7:].std(dim=0).sum().item()
+                    
+                    prefix = "Using left arm, " if left_std > right_std else "Using right arm, "
+                    caption = prefix + base_caption
+                except Exception as e:
+                    print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
+                    caption = base_caption  # Fallback
+
+            elif task_name == "place_bread_basket":
+                try:
+                    qpos_data = torch.load(qpos_path, map_location='cpu')
+                    data_subset = qpos_data[:90]
+                    left_std = data_subset[:, :7].std(dim=0).sum().item()
+                    right_std = data_subset[:, 7:].std(dim=0).sum().item()
+                    
+                    MOVEMENT_THRESHOLD = 0.1  # Heuristic threshold for significant movement
+                    is_dual_arm = (left_std > MOVEMENT_THRESHOLD and right_std > MOVEMENT_THRESHOLD)
+
+                    if is_dual_arm:
+                        caption = "Using both arms, simultaneously grab up two breads and put them in the basket."
+                    else:  # Single arm
+                        prefix = "Using left arm, " if left_std > right_std else "Using right arm, "
+                        caption = prefix + "grab the bread and put it in the basket."
+                except Exception as e:
+                    print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
+                    caption = base_caption # Fallback
+            else:
+                caption = base_caption
     
     info = {'video_path': dest_data_file_path, 'caption': caption, 'width': 640, 'height': 720, 'time': len(frames) / fps}
-    # with open(os.path.join('assets/test_video_rearranged', f'{task_name}.json'), 'w') as f:
-    #     json.dump(info, f, indent=4)
     print(f"{task_name} episode {episode_idx} videos to {dest_data_file_path} rearranged")
     return task_name, info
 
 
-def rearrange_video_dataset(source_dataset_path, dest_dataset_path, fps=30):
+def rearrange_video_dataset(source_dataset_path, dest_dataset_path, use_api_caption=False, fps=30):
     print(f"Rearrange {source_dataset_path} to {dest_dataset_path}")
     task_episode_info = defaultdict(list)
 
@@ -165,10 +210,18 @@ def rearrange_video_dataset(source_dataset_path, dest_dataset_path, fps=30):
                 
                 # Prepare arguments for the processing job
                 dest_data_file_path = os.path.join(dest_task_path, video_filename)
-                caption = ''
+                
                 try:
                     episode_idx = int(base_name.replace('episode', ''))
-                    jobs.append(pool.apply_async(rearrange_video_views, args=(task_name, source_video_path, dest_data_file_path, caption, fps, episode_idx)))
+                    jobs.append(pool.apply_async(rearrange_video_views, args=(
+                        task_name, 
+                        source_video_path, 
+                        dest_data_file_path, 
+                        source_qpos_path,
+                        use_api_caption,
+                        fps, 
+                        episode_idx
+                    )))
                 except (ValueError, IndexError):
                     print(f"Warning: Could not parse episode index from '{base_name}'. Skipping.")
     pool.close()
@@ -260,6 +313,10 @@ if __name__ == '__main__':
     os.environ['OPENAI_API_BASE'] = 'https://pro.xiaoai.plus/v1'
     os.environ['OPENAI_API_KEY'] = 'sk-zV5Are9supT6lXicA9HTRh9LVQ00L1sCPDw7oxMOz3ErsWOY'
     
+    # --- CHOOSE CAPTION GENERATION METHOD ---
+    # Set to True to use the OpenAI API, False to use the local PROMPT_DICT
+    USE_API_CAPTION = False
+
     # import pathlib
     # for dir in dirs_list:
     #     path_obj = pathlib.Path(dir)
@@ -281,7 +338,7 @@ if __name__ == '__main__':
     for dir in dirs_list:
         dest_dir = dir + "-rearranged"
         rearrange_video_dataset(
-            dir,dest_dir,fps=30
+            dir,dest_dir, use_api_caption=USE_API_CAPTION, fps=30
         )
         check_file(dest_dir)
     

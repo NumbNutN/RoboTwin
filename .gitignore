@@ -26,3 +26,6 @@ envs/curobo/*
 
 /*.json*
 /*.txt
+
+processed_data/*
+processed_data-rearranged/*
