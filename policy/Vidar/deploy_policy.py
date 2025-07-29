@@ -5,9 +5,11 @@ from .inference_vm import Vidar # Import the Vidar class
 
 def encode_obs(observation):  # Post-Process Observation
     obs = observation
-    head_rgbs = np.array(obs["head_camera"]["rgb"])
-    left_rgbs = np.array(obs["left_camera"]["rgb"])
-    right_rgbs = np.array(obs["right_camera"]["rgb"])
+
+    print("observation keys:", obs.keys())
+    head_rgbs = np.array(obs['observation']["head_camera"]["rgb"])
+    left_rgbs = np.array(obs['observation']["left_camera"]["rgb"])
+    right_rgbs = np.array(obs['observation']["right_camera"]["rgb"])
         
     # This logic assumes a single frame observation, not a sequence.
     # The original logic seemed to expect a sequence (len(head_rgbs)).
@@ -49,6 +51,9 @@ def eval(TASK_ENV, model, observation):
     instruction = TASK_ENV.get_instruction()
 
     # Set instruction and update observation for the model
+
+    # Set task name
+    model.set_task_name(TASK_ENV.task_name)
     model.set_instruction(instruction)
     model.update_obs(obs)
 

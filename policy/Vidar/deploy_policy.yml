@@ -9,7 +9,8 @@ instruction_type: unseen
 # Add Parameters You Need
 model_name: mask
 save_dir: output/grm_demo
-load_from: ckpts/3e-3_60000.pt
+load_from: policy/Vidar/ckpts/3e-3_60000.pt
+save_path: output/grm_demo
 
-ports: [23990]
+ports: [23981]
 tts: false

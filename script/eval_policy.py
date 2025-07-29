@@ -150,6 +150,9 @@ def main(usr_args):
     print("\033[94mEmbodiment Config:\033[0m " + embodiment_name)
     print("\n==================================")
 
+    # args["save_path"] = str(save_dir) # Convert Path object to string
+    # args["save_data"] = usr_args.get("save_data", False)
+
     TASK_ENV = class_decorator(args["task_name"])
     args["policy_name"] = policy_name
     usr_args["left_arm_dim"] = len(args["left_embodiment_config"]["arm_joints_name"][0])
@@ -208,6 +211,7 @@ def eval_policy(task_name,
     policy_name = args["policy_name"]
     eval_func = eval_function_decorator(policy_name, "eval")
     reset_func = eval_function_decorator(policy_name, "reset_model")
+
 
     now_seed = st_seed
     task_total_reward = 0
@@ -290,12 +294,13 @@ def eval_policy(task_name,
 
         succ = False
         reset_func(model)
-        while TASK_ENV.take_action_cnt < TASK_ENV.step_lim:
-            observation = TASK_ENV.get_obs()
-            eval_func(TASK_ENV, model, observation)
-            if TASK_ENV.eval_success:
-                succ = True
-                break
+
+        observation = TASK_ENV.get_obs()
+        eval_func(TASK_ENV, model, observation)
+
+        if TASK_ENV.eval_success:
+            succ = True
+
         # task_total_reward += TASK_ENV.episode_score
         if TASK_ENV.eval_video_path is not None:
             TASK_ENV._del_eval_video_ffmpeg()
