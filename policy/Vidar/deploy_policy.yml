@@ -1,9 +1,15 @@
 # Basic experiment configuration (keep unchanged)
-policy_name: null
-task_name: null
-task_config: null
-ckpt_setting: null
-seed: null
+policy_name: Vidar
+task_name: beat_block_hammer
+task_config: demo_randomized
+ckpt_setting: 3e-3_60000
+seed: 1234
 instruction_type: unseen
 
 # Add Parameters You Need
+model_name: mask
+save_dir: output/grm_demo
+load_from: ckpts/3e-3_60000.pt
+
+ports: [23990]
+tts: false

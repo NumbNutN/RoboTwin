@@ -7,13 +7,15 @@ import urllib3
 from base64 import b64encode, b64decode
 import os
 import multiprocessing
-import argparse
 import subprocess
 import logging
+import torch
+import torchvision
 
-from utils.inference.process import concatenate_images
-from utils.inference.select_video_api import process_responses
-from utils.inference.configs import *
+# from .utils.inference.process import process_image
+from .utils.inference.select_video_api import process_responses
+from .utils.inference.configs import *
+from .idm.idm import IDM
 
 
 logger = logging.getLogger(__name__)
@@ -32,21 +34,11 @@ def save_videos(videos, width, height, fps=8):
     workers = []
     for k, v in videos.items():
         ffmpeg_cmd = [
-            'ffmpeg',
-            '-y',
-            '-f', 'rawvideo',
-            '-vcodec', 'rawvideo',
-            '-s', f'{width}x{height}',
-            '-pix_fmt', 'bgr24',
-            '-r', str(fps),
-            '-i', '-',
-            '-c:v', 'libx264',
-            '-preset', 'veryslow',
-            '-crf', '10',
-            '-threads', '1',
-            '-pix_fmt', 'yuv420p',
-            '-loglevel', 'error',
-            k
+            'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
+            '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
+            '-i', '-', '-c:v', 'libx264', '-preset', 'veryslow',
+            '-crf', '10', '-threads', '1', '-pix_fmt', 'yuv420p',
+            '-loglevel', 'error', k
         ]
         workers.append(multiprocessing.Process(target=save_video, args=(ffmpeg_cmd, v)))
     for worker in workers:
@@ -67,25 +59,55 @@ class Vidar:
     def __init__(self, usr_args=None):
         if usr_args is None:
             usr_args = {}
+        # VM (Video Model) arguments
         self.ports = usr_args.get('ports', [23990])
         self.tts = usr_args.get('tts', False)
-        self.save_dir = usr_args.get('save_dir', 'output/grm')
+        self.save_dir = usr_args.get('save_dir', 'output/grm_demo')
         
+        # IDM (Inverse Dynamics Model) arguments
+        self.idm_model_name = usr_args.get('model_name', 'mask')
+        self.idm_load_from = usr_args.get('load_from', None)
+
         self.obs_cache = None
         self.prompt = None
         
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
         os.makedirs(self.save_dir, exist_ok=True)
-        logger.setLevel(level = logging.INFO)
+        self._setup_logger()
+
+        # Initialize the IDM model for video-to-action translation
+        self._initialize_idm()
+
+    def _setup_logger(self):
+        logger.setLevel(level=logging.INFO)
         handler = logging.FileHandler(os.path.join(self.save_dir, "log_vidar_policy.txt"))
         handler.setLevel(logging.INFO)
         formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         handler.setFormatter(formatter)
         console = logging.StreamHandler()
         console.setLevel(logging.INFO)
-        logger.addHandler(handler)
-        logger.addHandler(console)
+        if not logger.hasHandlers():
+            logger.addHandler(handler)
+            logger.addHandler(console)
+
+    def _initialize_idm(self):
+        """Initializes the IDM model and processor."""
+        logger.info("Initializing IDM model...")
+        self.dinov2_processor = torchvision.transforms.Compose([
+            torchvision.transforms.Resize((518, 518)),
+            torchvision.transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+
+        self.net = IDM(model_name=self.idm_model_name, output_dim=14).cuda()
+        if self.idm_load_from and os.path.isfile(self.idm_load_from):
+            with torch.cuda.stream(torch.cuda.Stream()):
+                loaded_dict = torch.load(self.idm_load_from, weights_only=False, map_location='cuda:0')
+                self.net.load_state_dict(loaded_dict["model_state_dict"])
+            logger.info(f"IDM model loaded from {self.idm_load_from}")
+        else:
+            raise FileNotFoundError(f"Cannot find IDM checkpoint at '{self.idm_load_from}'. Please provide a valid path via 'idm_load_from' argument.")
+        self.net.eval()
 
     def reset(self):
         """Resets the internal state of the model."""
@@ -102,19 +124,14 @@ class Vidar:
         system_prompt = "The whole scene is in a realistic, industrial art style with three views: a fixed rear camera, a movable left arm camera, and a movable right arm camera. The aloha robot is currently performing the following task: "
         self.prompt = system_prompt + instruction
 
-    def get_policy(self):
-        """
-        Generates a video policy based on the current observation and instruction.
-        Returns the file path to the generated policy video.
-        """
+    def _generate_video_policy(self):
+        """Generates a video policy and returns the file path."""
         if self.obs_cache is None:
             raise ValueError("Observation cache is empty. Call update_obs() first.")
         if not self.prompt:
             raise ValueError("Prompt is not set. Call set_instruction() first.")
         
-        obs = self.obs_cache
-
-        logger.info(f"Generating policy for prompt: '{self.prompt}'")
+        logger.info(f"Generating video policy for prompt: '{self.prompt}'")
         
         headers = {"Content-Type": "application/json"}
         seeds = [1234, 1235, 1236, 1237, 1238, 1239, 1240, 1241][:len(self.ports)]
@@ -124,7 +141,7 @@ class Vidar:
         for port, seed in zip(self.ports, seeds):
             data = {
                 "prompt": self.prompt, 
-                "img": b64encode(cv2.imencode(".jpg", obs, [int(cv2.IMWRITE_JPEG_QUALITY), 100])[1].tobytes()).decode("utf-8"), 
+                "img": b64encode(cv2.imencode(".jpg", self.obs_cache, [int(cv2.IMWRITE_JPEG_QUALITY), 100])[1].tobytes()).decode("utf-8"), 
                 "seed": seed, 
                 "password": "r49h8fieuwK"
             }
@@ -134,7 +151,6 @@ class Vidar:
         pool.join()
 
         responses = [job.get() for job in jobs]
-
         videos = {}
         sample_image = responses[0][0]
         height, width, _ = cv2.imdecode(np.frombuffer(b64decode(sample_image), np.uint8), cv2.IMREAD_COLOR).shape
@@ -159,3 +175,55 @@ class Vidar:
 
         logger.info(f"Policy video generated at: {policy_video_path}")
         return policy_video_path
+
+    def _video_to_actions(self, video_path):
+        """Converts a video file into a sequence of actions using the IDM."""
+        logger.info(f"Converting video policy '{video_path}' to actions...")
+        video = cv2.VideoCapture(video_path)
+        frames = []
+        while True:
+            ret, frame = video.read()
+            if not ret:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(torch.tensor(frame, device="cuda"))
+        video.release()
+
+        actions = []
+        with torch.no_grad():
+            for image in frames:
+                image = image.permute(2, 0, 1).unsqueeze(0)
+                inputs = self.dinov2_processor(image / 255)
+                if 'split' in self.idm_model_name:
+                    processed_image = process_image(inputs.squeeze(0).permute(1, 2, 0)).unsqueeze(1)
+                else:
+                    processed_image = inputs
+                output = self.net(processed_image, return_mask=False)
+                if isinstance(output, tuple):
+                    output, _ = output
+                action = output[0]
+                actions.append(action)
+        
+        actions = torch.stack(actions, dim=0).cpu().numpy()
+        logger.info(f"Generated {len(actions)} actions from video.")
+        return actions
+
+    def _modify_actions(self, actions):
+        """Applies post-processing to the generated actions."""
+        logger.info("Applying post-processing to generated actions...")
+        for dim in [6, 13]:
+            actions[:, dim] -= 0.4 * (1 - np.argsort(actions[:, dim]) / len(actions[:, dim]))
+            gripper = actions[:, dim]
+            mask = gripper < 0.5
+            gripper[mask] = 0
+            actions[:, dim] = gripper
+        return actions
+
+    def get_action(self):
+        """
+        Full pipeline: generates a video policy and converts it to a sequence of executable actions.
+        """
+        video_path = self._generate_video_policy()
+        raw_actions = self._video_to_actions(video_path)
+        modified_actions = self._modify_actions(raw_actions)
+        return modified_actions
