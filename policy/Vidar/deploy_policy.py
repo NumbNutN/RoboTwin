@@ -1,7 +1,7 @@
 # import packages and module here
 import numpy as np
 import cv2
-from .inference_vm import Vidar # Import the Vidar class
+from .vidar import Vidar # Import the Vidar class
 
 def encode_obs(observation):  # Post-Process Observation
     obs = observation

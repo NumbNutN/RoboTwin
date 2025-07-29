@@ -233,10 +233,7 @@ class Vidar:
             for image in frames:
                 image = image.permute(2, 0, 1).unsqueeze(0)
                 inputs = self.dinov2_processor(image / 255)
-                if 'split' in self.idm_model_name:
-                    processed_image = process_image(inputs.squeeze(0).permute(1, 2, 0)).unsqueeze(1)
-                else:
-                    processed_image = inputs
+                processed_image = inputs
                 output = self.net(processed_image, return_mask=False)
                 if isinstance(output, tuple):
                     output, _ = output
