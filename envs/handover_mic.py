@@ -40,6 +40,7 @@ class handover_mic(Base_Task):
     def play_once(self):
         # Determine the arm to grasp the microphone based on its position
         grasp_arm_tag = ArmTag("right" if self.microphone.get_pose().p[0] > 0 else "left")
+        self.arm_tag = grasp_arm_tag
         # The opposite arm will be used for the handover
         handover_arm_tag = grasp_arm_tag.opposite
 

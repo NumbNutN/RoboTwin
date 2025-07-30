@@ -2,6 +2,7 @@
 import numpy as np
 import cv2
 from .vidar import Vidar # Import the Vidar class
+from .vidar import SINGLE_ARM_DICT
 
 def encode_obs(observation):  # Post-Process Observation
     obs = observation
@@ -10,6 +11,11 @@ def encode_obs(observation):  # Post-Process Observation
     head_rgbs = np.array(obs['observation']["head_camera"]["rgb"])
     left_rgbs = np.array(obs['observation']["left_camera"]["rgb"])
     right_rgbs = np.array(obs['observation']["right_camera"]["rgb"])
+
+    # rgb to bgr
+    head_rgbs = head_rgbs[..., ::-1]
+    left_rgbs = left_rgbs[..., ::-1]
+    right_rgbs = right_rgbs[..., ::-1]
         
     # This logic assumes a single frame observation, not a sequence.
     # The original logic seemed to expect a sequence (len(head_rgbs)).
@@ -54,6 +60,9 @@ def eval(TASK_ENV, model, observation):
 
     # Set task name
     model.set_task_name(TASK_ENV.task_name)
+
+    if TASK_ENV.task_name in SINGLE_ARM_DICT:
+        model.set_arm_tag(TASK_ENV.arm_tag)
     model.set_episode_id(TASK_ENV.ep_num)
     model.set_instruction(instruction)
     model.update_obs(obs)

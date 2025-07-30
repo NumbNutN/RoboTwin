@@ -18,6 +18,8 @@ from .utils.inference.select_video_api import process_responses, env_init
 from .utils.inference.configs import *
 from .idm.idm import IDM
 
+from envs.utils.action import ArmTag
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +33,12 @@ PROMPT_DICT = {
     "pick_diverse_bottles":"using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
     
     
-    # left/right arm
+    # special
+    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket."
+}
+
+SINGLE_ARM_DICT = {
+# left/right arm
     "handover_mic": "grasp the microphone on the table and handover it to the other arm.",
     "move_can_pot": "there is a can and a pot on the table, pick up the can and move it to beside the pot.",
     "move_stapler_pad": "move the stapler to a colored mat.",
@@ -39,9 +46,6 @@ PROMPT_DICT = {
     "place_a2b_left":"place object A on the left of object B.",
     "turn_switch":"click the switch.",
     "stack_blocks_two":"move the red blocks to the center of the table, and using another arm to stack the geen block on the red block.",
-
-    # special
-    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket."
 }
 
 
@@ -59,7 +63,7 @@ def save_videos(videos, width, height, fps=8):
     for k, v in videos.items():
         ffmpeg_cmd = [
             'ffmpeg', '-y', '-f', 'rawvideo', '-vcodec', 'rawvideo',
-            '-s', f'{width}x{height}', '-pix_fmt', 'rgb24', '-r', str(fps),
+            '-s', f'{width}x{height}', '-pix_fmt', 'bgr24', '-r', str(fps),
             '-i', '-', '-c:v', 'libx264', '-preset', 'veryslow',
             '-crf', '10', '-threads', '1', '-pix_fmt', 'yuv420p',
             '-loglevel', 'error', k
@@ -154,9 +158,18 @@ class Vidar:
         prefix = "using both arms, "
         if instruction:
             instruction = instruction[0].lower() + instruction[1:]
-        # self.prompt = system_prompt + prefix + instruction
 
-        self.prompt = PROMPT_DICT[self.task_name] if self.task_name in PROMPT_DICT else system_prompt + prefix + instruction
+        if self.task_name in PROMPT_DICT:
+            self.prompt = system_prompt + PROMPT_DICT[self.task_name]
+        elif self.task_name in SINGLE_ARM_DICT:
+            if self.arm_tag == ArmTag("left"):
+                self.prompt = system_prompt + "using left arm, " + SINGLE_ARM_DICT[self.task_name]
+            elif self.arm_tag == ArmTag("right"):
+                self.prompt = system_prompt + "using right arm, " + SINGLE_ARM_DICT[self.task_name]
+            else:
+                raise ValueError(f"Invalid arm tag: {self.arm_tag}. Must be 'left' or 'right'.")
+        else:
+            self.prompt = system_prompt + prefix + instruction
 
     def set_task_name(self, task_name):
         """Sets the task name for the policy."""
@@ -165,6 +178,10 @@ class Vidar:
     def set_episode_id(self, episode_id):
         """Sets the episode ID for the current run."""
         self.episode_id = episode_id
+
+    def set_arm_tag(self, arm_tag):
+        """Sets the arm tag for the policy."""
+        self.arm_tag = arm_tag
 
     def _generate_video_policy(self):
         """Generates a video policy and returns the file path."""
@@ -258,15 +275,48 @@ class Vidar:
         logger.info(f"Generated {len(actions)} actions from video.")
         return actions
 
-    def _modify_actions(self, actions):
-        """Applies post-processing to the generated actions."""
-        logger.info("Applying post-processing to generated actions...")
+    # def _modify_actions(self, actions):
+    #     """Applies post-processing to the generated actions."""
+    #     logger.info("Applying post-processing to generated actions...")
+    #     for dim in [6, 13]:
+    #         actions[:, dim] -= 0.4 * (1 - np.argsort(actions[:, dim]) / len(actions[:, dim]))
+    #         gripper = actions[:, dim]
+    #         mask = gripper < 0.5
+    #         gripper[mask] = 0
+    #         actions[:, dim] = gripper
+    #     return actions
+
+    def _modify_actions(self,actions, gripper_strengthen_factor=2.5, bias=-0.5):
+        """
+        以第一帧为基准，对夹爪角度的变化量做线性变换后施加回去，并将夹角限制在[0, 5]区间
+        :param actions: shape (N, 14)
+        :param gripper_strengthen_factor: 收紧趋势加强系数
+        :param bias: 偏置
+        :return: 修改后的actions
+        """
+            
         for dim in [6, 13]:
-            actions[:, dim] -= 0.4 * (1 - np.argsort(actions[:, dim]) / len(actions[:, dim]))
-            gripper = actions[:, dim]
-            mask = gripper < 0.5
-            gripper[mask] = 0
-            actions[:, dim] = gripper
+            
+            # 平滑滤波（滑动平均，窗口=5）
+            smoothed = actions[:, dim].copy()
+            for i in range(2, len(smoothed)-2):
+                smoothed[i] = (actions[i-2, dim] + actions[i-1, dim] + actions[i, dim] + actions[i+1, dim] + actions[i+2, dim]) / 5
+            actions[:, dim] = smoothed
+
+            # if action is decreasing and action < 3, then set to 0
+            diffs = actions[1:, dim] - actions[:-1, dim]
+            mask = diffs < 0.1
+            # append one more element to mask
+            mask = np.concatenate(([False], mask))
+            actions[:, dim] = np.where(mask & (actions[:, dim] < 0.3), np.clip(actions[:, dim],None,0), actions[:, dim])
+            actions[:, dim] = np.where(actions[:, dim] > 0.7, np.clip(actions[:, dim], 1, None), actions[:, dim])
+
+
+        # if self.arm_tag == ArmTag("left"):
+        #     actions[50:,13] = 0
+        # elif self.arm_tag == ArmTag("right"):
+        #     actions[50:,6] = 0
+    
         return actions
 
     def get_action(self):
@@ -275,5 +325,8 @@ class Vidar:
         """
         video_path = self._generate_video_policy()
         raw_actions = self._video_to_actions(video_path)
+        # save the actions to a file
+        np.save(os.path.join(self.save_dir, self.timestamp_str, self.task_name, f"episode_{self.episode_id}", "raw_actions.npy"), raw_actions)
         modified_actions = self._modify_actions(raw_actions)
+        np.save(os.path.join(self.save_dir, self.timestamp_str, self.task_name, f"episode_{self.episode_id}", "modified_actions.npy"), modified_actions)
         return modified_actions

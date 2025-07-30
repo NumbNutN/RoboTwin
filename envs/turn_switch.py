@@ -27,14 +27,14 @@ class turn_switch(Base_Task):
     def play_once(self):
         switch_pose = self.switch.get_pose()
         face_dir = -switch_pose.to_transformation_matrix()[:3, 0]
-        arm_tag = ArmTag("right" if face_dir[0] > 0 else "left")
+        self.arm_tag = ArmTag("right" if face_dir[0] > 0 else "left")
 
         # close gripper
-        self.move(self.close_gripper(arm_tag=arm_tag, pos=0))
+        self.move(self.close_gripper(arm_tag=self.arm_tag, pos=0))
         # move the gripper to turn off the switch
-        self.move(self.grasp_actor(self.switch, arm_tag=arm_tag, pre_grasp_dis=0.04))
+        self.move(self.grasp_actor(self.switch, arm_tag=self.arm_tag, pre_grasp_dis=0.04))
 
-        self.info["info"] = {"{A}": f"056_switch/base{self.model_id}", "{a}": str(arm_tag)}
+        self.info["info"] = {"{A}": f"056_switch/base{self.model_id}", "{a}": str(self.arm_tag)}
         return self.info
 
     def check_success(self):
