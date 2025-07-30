@@ -54,6 +54,7 @@ def eval(TASK_ENV, model, observation):
 
     # Set task name
     model.set_task_name(TASK_ENV.task_name)
+    model.set_episode_id(TASK_ENV.ep_num)
     model.set_instruction(instruction)
     model.update_obs(obs)
 

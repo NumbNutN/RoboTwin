@@ -2,15 +2,15 @@
 policy_name: Vidar
 task_name: beat_block_hammer
 task_config: demo_randomized
-ckpt_setting: 3e-3_60000
+ckpt_setting: robotwin_55000
 seed: 1234
 instruction_type: unseen
 
 # Add Parameters You Need
 model_name: mask
 save_dir: output/grm_demo
-load_from: policy/Vidar/ckpts/3e-3_60000.pt
+load_from: policy/Vidar/ckpts/robotwin_55000.pt
 save_path: output/grm_demo
 
-ports: [23981]
-tts: false
+ports: [23921,23931,23941]
+tts: true

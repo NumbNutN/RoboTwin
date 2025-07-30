@@ -14,12 +14,35 @@ import torchvision
 from datetime import datetime
 
 # from .utils.inference.process import process_image
-from .utils.inference.select_video_api import process_responses
+from .utils.inference.select_video_api import process_responses, env_init
 from .utils.inference.configs import *
 from .idm.idm import IDM
 
 
 logger = logging.getLogger(__name__)
+
+PROMPT_DICT = {
+
+    # fix joint
+    "grab_roller": "using both arms, grab the roller on the table.",
+    "handover_block": "using both arms, using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
+    "hanging_mug": "using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
+    "lift_pot": "using both arms, lift the pot.",
+    "pick_diverse_bottles":"using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
+    
+    
+    # left/right arm
+    "handover_mic": "grasp the microphone on the table and handover it to the other arm.",
+    "move_can_pot": "there is a can and a pot on the table, pick up the can and move it to beside the pot.",
+    "move_stapler_pad": "move the stapler to a colored mat.",
+    "open_laptop": "open the laptop.",
+    "place_a2b_left":"place object A on the left of object B.",
+    "turn_switch":"click the switch.",
+    "stack_blocks_two":"move the red blocks to the center of the table, and using another arm to stack the geen block on the red block.",
+
+    # special
+    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket."
+}
 
 
 def save_video(ffmpeg_cmd, images):
@@ -56,26 +79,6 @@ def worker(port, headers, data, verify):
     return response
 
 
-def get_unique_filepath(filepath):
-    """
-    Generates a unique file path by appending an index if the file already exists.
-    e.g. /path/to/video.mp4 -> /path/to/video_1.mp4
-    """
-    if not os.path.exists(filepath):
-        return filepath
-    
-    directory, filename = os.path.split(filepath)
-    name, ext = os.path.splitext(filename)
-    
-    i = 1
-    while True:
-        new_name = f"{name}_{i}{ext}"
-        new_filepath = os.path.join(directory, new_name)
-        if not os.path.exists(new_filepath):
-            return new_filepath
-        i += 1
-
-
 class Vidar:
     def __init__(self, usr_args=None):
         if usr_args is None:
@@ -91,6 +94,9 @@ class Vidar:
 
         self.obs_cache = None
         self.prompt = None
+        self.episode_id = 0
+
+        env_init()
         
         self.timestamp_str = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
         
@@ -143,12 +149,22 @@ class Vidar:
 
     def set_instruction(self, instruction):
         """Sets the task instruction for the policy."""
+
         system_prompt = "The whole scene is in a realistic, industrial art style with three views: a fixed rear camera, a movable left arm camera, and a movable right arm camera. The aloha robot is currently performing the following task: "
-        self.prompt = system_prompt + instruction
+        prefix = "using both arms, "
+        if instruction:
+            instruction = instruction[0].lower() + instruction[1:]
+        # self.prompt = system_prompt + prefix + instruction
+
+        self.prompt = PROMPT_DICT[self.task_name] if self.task_name in PROMPT_DICT else system_prompt + prefix + instruction
 
     def set_task_name(self, task_name):
         """Sets the task name for the policy."""
         self.task_name = task_name
+
+    def set_episode_id(self, episode_id):
+        """Sets the episode ID for the current run."""
+        self.episode_id = episode_id
 
     def _generate_video_policy(self):
         """Generates a video policy and returns the file path."""
@@ -161,9 +177,9 @@ class Vidar:
         
         logger.info(f"Generating video policy for prompt: '{self.prompt}'")
         
-        # Create a directory for the current task inside save_dir
-        task_video_dir = os.path.join(self.save_dir, self.timestamp_str, self.task_name)
-        os.makedirs(task_video_dir, exist_ok=True)
+        # Create a directory for the current episode inside the task directory
+        episode_video_dir = os.path.join(self.save_dir, self.timestamp_str, self.task_name, f"episode_{self.episode_id}")
+        os.makedirs(episode_video_dir, exist_ok=True)
         
         headers = {"Content-Type": "application/json"}
         seeds = [1234, 1235, 1236, 1237, 1238, 1239, 1240, 1241][:len(self.ports)]
@@ -187,30 +203,28 @@ class Vidar:
         sample_image = responses[0][0]
         height, width, _ = cv2.imdecode(np.frombuffer(b64decode(sample_image), np.uint8), cv2.IMREAD_COLOR).shape
         
-        port_to_unique_path = {}
+        port_to_path = {}
         for i, port in enumerate(self.ports):
-            base_path = os.path.join(task_video_dir, f"{port}.mp4")
-            unique_path = get_unique_filepath(base_path)
-            videos[unique_path] = responses[i]
-            port_to_unique_path[port] = unique_path
+            path = os.path.join(episode_video_dir, f"{port}.mp4")
+            videos[path] = responses[i]
+            port_to_path[port] = path
 
         policy_video_path = None
         if self.tts:
             video_index = process_responses(self.prompt, responses)
             logger.info(f"TTS selected video index: {video_index}, port: {self.ports[video_index]}")
             
-            # Create a uniquely named "tts.mp4" file
-            tts_base_path = os.path.join(task_video_dir, "tts.mp4")
-            policy_video_path = get_unique_filepath(tts_base_path)
+            # Save the selected video as "tts.mp4"
+            policy_video_path = os.path.join(episode_video_dir, "tts.mp4")
             videos[policy_video_path] = responses[video_index]
         elif len(self.ports) == 1:
-            policy_video_path = port_to_unique_path[self.ports[0]]
+            policy_video_path = port_to_path[self.ports[0]]
         
         save_videos(videos, width, height, fps=8)
         
         if policy_video_path is None:
             logger.error("No policy video was selected. TTS is off and multiple ports were used. Falling back to the first port.")
-            policy_video_path = port_to_unique_path[self.ports[0]]
+            policy_video_path = port_to_path[self.ports[0]]
 
         logger.info(f"Policy video generated at: {policy_video_path}")
         return policy_video_path

@@ -1,6 +1,20 @@
 from openai import OpenAI
 import openai
 import os
+import logging
+logger = logging.getLogger(__name__)
+
+def env_init():
+    os.environ['OPENAI_API_BASE'] = 'https://pro.xiaoai.plus/v1'
+    os.environ['OPENAI_API_KEY'] = 'sk-zV5Are9supT6lXicA9HTRh9LVQ00L1sCPDw7oxMOz3ErsWOY'
+    os.environ['DISABLE_PROXY'] = 'true'
+
+    # 首先清除所有代理环境变量
+    proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'SOCKS_PROXY', 'socks_proxy']
+    for var in proxy_vars:
+        if var in os.environ:
+            print(f"Clearing proxy environment variable: {var}")
+            del os.environ[var]
 
 def get_imgs(responses, n_imgs_per_video, select_every, video_indexes):
     imgs = []
@@ -14,7 +28,8 @@ def get_imgs(responses, n_imgs_per_video, select_every, video_indexes):
 def process_responses(prompt, responses):
     n_videos = len(responses)
     if n_videos == 1:
-        return {"imgs": responses[0]}
+        logger.info("TTS default to 0 due to only one video")
+        return 0
 
     n_imgs_per_video = 5
     select_every = len(responses[0]) // (n_imgs_per_video + 1)

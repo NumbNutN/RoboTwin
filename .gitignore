@@ -30,3 +30,4 @@ envs/curobo/*
 processed_data/*
 processed_data-rearranged/*
 output/*
+history/*
