@@ -10,7 +10,7 @@ eval_video/
 task_config/
 
 # eval result
-eval_result/
+eval_result*/
 
 # Code Generation
 assets/*
