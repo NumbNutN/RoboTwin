@@ -3,38 +3,65 @@
 </h1>
 <h2 align="center">Lastest Version: RoboTwin 2.0<br>🤲 <a href="https://robotwin-platform.github.io/">Webpage</a> | <a href="https://robotwin-platform.github.io/doc/">Document</a> | <a href="https://arxiv.org/abs/2506.18088">Paper</a> | <a href="https://robotwin-platform.github.io/doc/community/index.html">Community</a></h2>
 
-https://private-user-images.githubusercontent.com/88101805/463126988-e3ba1575-4411-4a36-ad65-f0b2f49890c3.mp4
+
+### Embodiments Configuration
+
+Serveral files are modified to adapt to Vidar Setting (three camera views)
+
+`assets/embodiments/aloha-agilex/urdf/arx5_description_isaac.urdf`
 
 
-**[Vidar data collection]**
+`assets/embodiments/aloha-agilex/config.yml`
+
+
+### [Vidar data collection]
+
+**Collect data for 50 bimanual tasks in clean or randomized simulation environment**:
 ```
-bash collect_data.sh {task_name} demo_randomized {gpu_idx}
+bash collect_data.sh {task_name} {task_config} {gpu_idx}
 ```
 
-**[Vidar inference]**
-```
-bash eval.sh {task_name} demo_randomized {gpu_idx}
-```
++ **task_name** View [50 bimanual tasks](https://robotwin-platform.github.io/doc/tasks/index.html)
 
-**availiable tasks see**: [50 bimanual tasks](https://robotwin-platform.github.io/doc/tasks/index.html)
++ **task_config** View {ROBOTWIN_DIR}/task_config. Customize domain randomization, camera type, embodiments, collecting episode number, save path, etc.. 
 
-**collected data** in `data` with structure:
+
+**collected data directroies structure**:
 ```
 data/{task_name}/data/episode_{idx}.hdf5
 data/{task_name}/video/episode_{idx}.mp4
 ```
 
-**inference record** in `eval_result` with structure:
+**Data Preprocess**
+
+Restructure the data directoires (copy to dst path), add prompt:
+```
+python script/data_preprocess/prepare_data4vidar.py
+```
+
+### [Vidar Policy Evalution]
+
+The Vidar poicy reference files located in `policy/Vidar`. The standard interface refer: [Deploy Your Policy](https://robotwin-platform.github.io/doc/usage/deploy-your-policy.html)
+
+**Evaluate Vidar in Simulation Environment**:
+```
+bash eval.sh {task_name} {task_config} {gpu_idx}
+```
+
+
+**evaluation record** in `eval_result` likes:
 ```
 eval_result/{task_name}/Vidar/{task_config}/{time_stamp}/episode_{idx}.mp4
 ```
 
-**inference video** in `output` with structure:
+**inference video** in `output` likes:
 ```
 output/{model_name}/{timestamp}/{port}_idx.mp4
 ```
 
-**Following are orginal description**:
+### Orginal Description
+
+https://private-user-images.githubusercontent.com/88101805/463126988-e3ba1575-4411-4a36-ad65-f0b2f49890c3.mp4
 
 **[2.0 Version (lastest)]** RoboTwin 2.0: A Scalable Data Generator and Benchmark with Strong Domain Randomization for Robust Bimanual Robotic Manipulation<br>
 <i>Under Review 2025</i>: [Webpage](https://robotwin-platform.github.io/) | [Document](https://robotwin-platform.github.io/doc) | [PDF](https://arxiv.org/pdf/2506.18088) | [arXiv](https://arxiv.org/abs/2506.18088) | [Talk (in Chinese)](https://www.bilibili.com/video/BV18p3izYE63/?spm_id_from=333.337.search-card.all.click) | [机器之心](https://mp.weixin.qq.com/s/SwORezmol2Qd9YdrGYchEA)<br>
