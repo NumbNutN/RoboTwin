@@ -18,6 +18,7 @@ from datetime import datetime
 
 import shutil
 
+
 PROMPT_DICT = {
 
     # fix joint
@@ -27,7 +28,25 @@ PROMPT_DICT = {
     "lift_pot": "using both arms, lift the pot.",
     "pick_diverse_bottles":"using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
     
+    # special
+    "place_bread_basket":"if there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket.",
     
+    "blocks_ranking_rgb":"using both arms, place the red block, green block, and blue block in the order of red, green, and blue from left to right, placing in a row.",
+    "blocks_ranking_size":"using both arms, move the blocks to the center of the table, and arrange them from largest to smallest, from left to right.",
+    "pick_dual_bottles":"using both arms, pick up two bottles with one arm, and pick up another bottle with the other arm.",
+    "place_bread_skillet":"using both arms, if there is one bread on the table, grab the bread and put it in the skillet, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the skillet.",
+    "place_burger_fries":"using both arms, pick the hamburg and frenchfries and put them onto the tray.",
+    "place_can_basket":"using both arms, Use one arm to pick up the can and another arm place it in the basket.",
+    "place_cans_plasticbox":"using both arms, pick and place cans into plasticbox.",
+    "place_dual_shoes":"using both arms, pick up the two shoes on the table and put them in the shoebox, with the shoe tip pointing to the left.",
+    "place_object_basket":"using both arms, one arm to grab the target object and put it in the basket, then use the other arm to grab the basket, and finally move the basket slightly away.",
+    "put_bottles_dustbin":"using both arms, grab the bottles and put them into the dustbin to the left of the table.",
+    "put_object_cabinet":"using both arms, use one arm to open the cabinet's drawer, and use another arm to put the object on the table to the drawer.",
+    "scan_object":"using both arms, use one arm to pick the scanner and use the other arm to pick the object, and use the scanner to scan the object.",
+    "stack_bowls_two":"using both arms, stack the two bowls on top of each other."
+}
+
+SINGLE_ARM_DICT = {
     # left/right arm
     "handover_mic": "grasp the microphone on the table and handover it to the other arm.",
     "move_can_pot": "there is a can and a pot on the table, pick up the can and move it to beside the pot.",
@@ -37,10 +56,31 @@ PROMPT_DICT = {
     "turn_switch":"click the switch.",
     "stack_blocks_two":"move the red blocks to the center of the table, and using another arm to stack the geen block on the red block.",
 
-    # special
-    "place_bread_basket":"If there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket."
-}
 
+    "adjust_bottle":"pick up the bottle on the table headup",
+    "beat block hammer":"take the yellow and black hammer grip and strike the block",
+    "click_alarmclock":"click the alarm clock's center of the top side button on the table.",
+    "click_bell":"click the bell's top center on the table.",
+    "dump_bin_bigbin":"grab the small bin and pour the balls into the big bin.",
+    "move_playingcard_away":"pick up the playing card and move it away from the table. For example, if the playing card is on the outward side of the table, you should move it further outward side of the table.",
+    "open_microwave":"open the microwave.",
+    "place_a2b_right":"place object A on the right of object B.",
+    "place_container_plate":"place the container onto the plate.",
+    "place_empty_cup":"place the empty cup on the coaster.",
+    "place_fan":"grab the fan and place it on a colored mat, and make sure the fan is facing the robot.",
+    "place_mouse_pad":"grab the mouse and place it on a colored mat.",
+    "place_object_scale":"grab the object and put it on the scale.",
+    "place_object_stand":"place the object on the stand.",
+    "place_phone_stand":"pick up the phone and put it on the phone stand.",
+    "place_shoe":"grab the shoe from the table and place it on the mat.",
+    "press_stapler":"press the stapler.",
+    "rotate_qrcode":"catch the qrcode board on the table, pick it up and rotate to let the qrcode face towards the robot.",
+    "shake_bottle_horizontally":"shake the bottle horizontally.",
+    "shake_bottle":"shake the bottle",
+    "stamp_seal":"grab the stamp and stamp onto the specific color mat.",
+    "move_pillbottle_pad":"pick the pillbottle and place it onto the pad."
+
+}
 
 def get_prompt(task_name):
     return f'{task_name[0].lower()}{task_name[1:]}'
@@ -118,51 +158,47 @@ def rearrange_video_views(task_name, video_paths, dest_data_file_path, qpos_path
                 time.sleep(30*fail)
     else:
         # Generate caption from PROMPT_DICT
-        base_caption = PROMPT_DICT.get(task_name)
-        if base_caption is None:
-            print(f"Warning: Task '{task_name}' not in PROMPT_DICT. Caption will be empty.")
-            caption = ""
-        else:
-            left_right_tasks = [
-                "handover_mic", "move_can_pot", "move_stapler_pad", 
-                "open_laptop", "place_a2b_left", "turn_switch", "stack_blocks_two"
-            ]
+        
+        if task_name in PROMPT_DICT:
+            base_caption = PROMPT_DICT.get(task_name)
+            caption = base_caption
+        elif task_name in SINGLE_ARM_DICT:
+            base_caption = SINGLE_ARM_DICT.get(task_name)
+            try:
+                qpos_data = torch.load(qpos_path, map_location='cpu')
+                # Only analyze the first 30 frames
+                data_subset = qpos_data[:30]
+                left_std = data_subset[:, :7].std(dim=0).sum().item()
+                right_std = data_subset[:, 7:].std(dim=0).sum().item()
+                
+                prefix = "using left arm, " if left_std > right_std else "using right arm, "
+                caption = prefix + base_caption
+            except Exception as e:
+                print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
+                caption = base_caption  # Fallback
 
-            if task_name in left_right_tasks:
-                try:
-                    qpos_data = torch.load(qpos_path, map_location='cpu')
-                    # Only analyze the first 30 frames
-                    data_subset = qpos_data[:30]
-                    left_std = data_subset[:, :7].std(dim=0).sum().item()
-                    right_std = data_subset[:, 7:].std(dim=0).sum().item()
-                    
+        elif task_name == "place_bread_basket":
+            base_caption  = PROMPT_DICT.get(task_name)
+            try:
+                qpos_data = torch.load(qpos_path, map_location='cpu')
+                # Only analyze the first 30 frames
+                data_subset = qpos_data[:30]
+                left_std = data_subset[:, :7].std(dim=0).sum().item()
+                right_std = data_subset[:, 7:].std(dim=0).sum().item()
+                
+                MOVEMENT_THRESHOLD = 0.1  # Heuristic threshold for significant movement
+                is_dual_arm = (left_std > MOVEMENT_THRESHOLD and right_std > MOVEMENT_THRESHOLD)
+
+                if is_dual_arm:
+                    caption = "using both arms, simultaneously grab up two breads and put them in the basket."
+                else:  # Single arm
                     prefix = "using left arm, " if left_std > right_std else "using right arm, "
-                    caption = prefix + base_caption
-                except Exception as e:
-                    print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
-                    caption = base_caption  # Fallback
-
-            elif task_name == "place_bread_basket":
-                try:
-                    qpos_data = torch.load(qpos_path, map_location='cpu')
-                    # Only analyze the first 30 frames
-                    data_subset = qpos_data[:30]
-                    left_std = data_subset[:, :7].std(dim=0).sum().item()
-                    right_std = data_subset[:, 7:].std(dim=0).sum().item()
-                    
-                    MOVEMENT_THRESHOLD = 0.1  # Heuristic threshold for significant movement
-                    is_dual_arm = (left_std > MOVEMENT_THRESHOLD and right_std > MOVEMENT_THRESHOLD)
-
-                    if is_dual_arm:
-                        caption = "using both arms, simultaneously grab up two breads and put them in the basket."
-                    else:  # Single arm
-                        prefix = "using left arm, " if left_std > right_std else "using right arm, "
-                        caption = prefix + "grab the bread and put it in the basket."
-                except Exception as e:
-                    print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
-                    caption = base_caption # Fallback
-            else:
-                caption = base_caption
+                    caption = prefix + "grab the bread and put it in the basket."
+            except Exception as e:
+                print(f"Error processing qpos for {task_name} ep {episode_idx}: {e}")
+                caption = base_caption # Fallback
+        else:
+            caption = ""
     
     info = {'video_path': dest_data_file_path, 'caption': caption, 'width': 640, 'height': 720, 'time': len(frames) / fps}
     print(f"{task_name} episode {episode_idx} videos to {dest_data_file_path} rearranged")
@@ -320,24 +356,6 @@ if __name__ == '__main__':
     # --- CHOOSE CAPTION GENERATION METHOD ---
     # Set to True to use the OpenAI API, False to use the local PROMPT_DICT
     USE_API_CAPTION = False
-
-    # import pathlib
-    # for dir in dirs_list:
-    #     path_obj = pathlib.Path(dir)
-    #     entrys = [entry for entry in path_obj.iterdir() if entry.is_dir()]
-    #     dest_entrys = []
-    #     for entry in entrys:
-    #         # 构造新的目录名
-    #         new_name = f"{entry.name}-rearranged"
-    #         # 获取父目录，然后连接上新的名称
-    #         new_path = entry.parent / new_name
-    #         dest_entrys.append(new_path)
-        
-    #     for entry, dest_entry in zip(entrys,dest_entrys):
-    #         rearrange_video_dataset(
-    #             str(entry.resolve()),str(dest_entry.resolve()),fps=30
-    #         )
-    #         check_file(dest_entry.resolve())
     
     for dir in dirs_list:
         dest_dir = dir + "-rearranged"
@@ -346,29 +364,3 @@ if __name__ == '__main__':
         )
         check_file(dest_dir)
     
-        # check_file(dest_dir)
-    # rearrange_video_dataset(
-    #     '/media/user/Dataset/cobot-magic/assets/cube0426', 
-    #     # '/media/user/Dataset/cobot-magic/assets/cube0418-rearranged', 
-    #     r'assets/cube0426-random-rearranged',
-    #     fps=30)
-    # rearrange_video_dataset(
-    #    r'/media/user/My Passport/IDM_dataset/cube0506', 
-    # #    r'/media/user/My\ Passport/IDM_dataset/cube0418-random-rearranged',
-    #    r'assets/cube0506-random-rearranged',
-    #    fps=30)
-    # rearrange_video_dataset(
-    #   r'assets/test_video',
-    # #    r'/media/user/My\ Passport/IDM_dataset/cube0418-random-rearranged',
-    #    r'assets/test_video_rearranged',
-    #    fps=30)
-    # check_file('assets/cube0418-human-rearranged')
-    # check_file('assets/cube0418-random-rearranged')
-    # check_file('assets/cube0418-random-rearranged_')
-    # check_file('assets/cube0418-random-rearranged2')
-    # check_file('assets/cube0426-random-rearranged')
-    # check_file('assets/cube0426-random-rearranged2')
-    # check_file('assets/cube0430-random-rearranged')
-    # check_file('assets/test_video_rearranged')
-    # check_file('assets/cube0506-random-rearranged')
-    # rearrange_task_json('assets/test_video_rearranged')

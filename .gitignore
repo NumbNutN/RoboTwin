@@ -1,5 +1,5 @@
 models/
-data/*
+data*/*
 __pycache__/
 **/checkpoints/
 result/
@@ -31,3 +31,4 @@ processed_data/*
 processed_data-rearranged/*
 output/*
 history/*
+primitive_library/*
