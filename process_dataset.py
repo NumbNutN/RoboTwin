@@ -3,21 +3,21 @@ import json
 import shutil
 import numpy as np
 import torch
+import argparse
 from envs.utils.parse_hdf5 import read_hdf5
 from tqdm import tqdm
 
-def process_task(task_path, output_dir):
+def process_task(task_data_path, output_dir, task_name):
     """
     Processes a single task directory: extracts action vectors, copies videos,
-    and creates a JSON index in the output directory.
+    and returns a list of dictionaries for the JSON index.
     """
-    task_name = os.path.basename(task_path)
-    hdf5_dir = os.path.join(task_path, "data")
-    video_dir = os.path.join(task_path, "video")
+    hdf5_dir = os.path.join(task_data_path, "data")
+    video_dir = os.path.join(task_data_path, "video")
 
     if not (os.path.isdir(hdf5_dir) and os.path.isdir(video_dir)):
         print(f"Skipping '{task_name}' as it does not contain 'data' and 'video' subdirectories.")
-        return
+        return []
 
     print(f"\nProcessing task: {task_name}")
 
@@ -25,7 +25,7 @@ def process_task(task_path, output_dir):
     output_task_dir = os.path.join(output_dir, task_name)
     os.makedirs(output_task_dir, exist_ok=True)
     output_json_path = f"{output_task_dir}.json"
-    
+
     json_data = []
     
     try:
@@ -36,7 +36,7 @@ def process_task(task_path, output_dir):
         hdf5_files = sorted(hdf5_files_to_process, key=lambda x: int(x.replace("episode", "").replace(".hdf5", "")))
     except (ValueError, FileNotFoundError):
         print(f"  - Warning: Could not find or sort files in {hdf5_dir}. Skipping task.")
-        return
+        return []
 
     for hdf5_filename in tqdm(hdf5_files, desc=f"  - Episodes in {task_name}"):
         if not hdf5_filename.endswith(".hdf5"):
@@ -75,27 +75,47 @@ def process_task(task_path, output_dir):
         with open(output_json_path, "w") as f:
             json.dump(json_data, f, indent=4)
         print(f"  - Created JSON index at: {output_json_path}")
+    return None
 
 
 def main():
-    dataset_dir = "/home/numbnut/repo/RobotTwin2/data"
-    output_dir = "/home/numbnut/repo/RobotTwin2/processed_data"
+    parser = argparse.ArgumentParser(description="Process a robotics dataset.")
+    parser.add_argument("src_dir", type=str, help="Source directory for the dataset (the root).")
+    parser.add_argument("dst_dir", type=str, help="Destination directory for the processed data.")
+    parser.add_argument("task_config", type=str, help="Task configuration subdirectory name (e.g., 'expert_demos').")
+    args = parser.parse_args()
+
+    dataset_dir = args.src_dir
+    output_base_dir = os.path.join(args.dst_dir)
+    
     
     if not os.path.isdir(dataset_dir):
-        print(f"Error: Dataset directory not found at {dataset_dir}")
+        print(f"Error: Source dataset directory not found at {dataset_dir}")
         return
         
-    os.makedirs(output_dir, exist_ok=True)
-    print(f"Starting dataset processing.")
-    print(f"Source: {dataset_dir}")
-    print(f"Output: {output_dir}")
+    os.makedirs(output_base_dir, exist_ok=True)
+    print(f"Starting dataset processing for task config: '{args.task_config}'")
+    print(f"Source root: {dataset_dir}")
+    print(f"Outputting to: {output_base_dir}")
 
-    # Iterate over each item in the dataset directory. Each item is a task.
-    for task_name in os.listdir(dataset_dir):
-        task_path = os.path.join(dataset_dir, task_name)
-        if os.path.isdir(task_path):
-            process_task(task_path, output_dir)
+    all_json_data = []
+    # Iterate over each high-level task folder in the dataset directory.
+    for task_name in sorted(os.listdir(dataset_dir)):
+        # The path to the specific task config data for this task
+        task_data_path = os.path.join(dataset_dir, task_name, args.task_config)
+        
+        if os.path.isdir(task_data_path):
+            # Pass the task_name explicitly
+            task_json_data = process_task(task_data_path, output_base_dir, task_name)
+            if task_json_data:
+                all_json_data.extend(task_json_data)
     
+    if all_json_data:
+        output_json_path = os.path.join(args.dst_dir, f"{args.task_config}.json")
+        with open(output_json_path, "w") as f:
+            json.dump(all_json_data, f, indent=4)
+        print(f"\nCreated summary JSON index at: {output_json_path}")
+
     print("\nDataset processing finished.")
 
 

@@ -17,6 +17,7 @@ import subprocess
 from datetime import datetime
 
 import shutil
+import argparse
 
 
 PROMPT_DICT = {
@@ -335,12 +336,13 @@ def rearrange_task_json(dest_dataset_path):
             json.dump(info_new, f, indent=4)
 
 
-dirs_list = [
-    "/home/numbnut/repo/RobotTwin2/processed_data"
-]
-
-
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description="Rearrange video dataset for VIDAR.")
+    parser.add_argument('--src-dirs', nargs='+', required=True, help='List of source directories to process.')
+    parser.add_argument('--dst-dir-prefix', required=True, help='Parent directory for the rearranged data. Each source directory will have a corresponding subdirectory created here.')
+    parser.add_argument('--use-api-caption', action='store_true', help='Use OpenAI API to generate captions instead of local prompts.')
+    args = parser.parse_args()
+
     # 首先清除所有代理环境变量
     proxy_vars = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'SOCKS_PROXY', 'socks_proxy']
     for var in proxy_vars:
@@ -353,14 +355,10 @@ if __name__ == '__main__':
     os.environ['OPENAI_API_BASE'] = 'https://pro.xiaoai.plus/v1'
     os.environ['OPENAI_API_KEY'] = 'sk-zV5Are9supT6lXicA9HTRh9LVQ00L1sCPDw7oxMOz3ErsWOY'
     
-    # --- CHOOSE CAPTION GENERATION METHOD ---
-    # Set to True to use the OpenAI API, False to use the local PROMPT_DICT
-    USE_API_CAPTION = False
-    
-    for dir in dirs_list:
-        dest_dir = dir + "-rearranged"
+    for src_dir in args.src_dirs:
+        dest_dir = os.path.join(args.dst_dir_prefix, os.path.basename(src_dir))
         rearrange_video_dataset(
-            dir,dest_dir, use_api_caption=USE_API_CAPTION, fps=30
+            src_dir, dest_dir, use_api_caption=args.use_api_caption, fps=30
         )
         check_file(dest_dir)
     
