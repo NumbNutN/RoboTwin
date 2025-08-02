@@ -13,6 +13,8 @@ from tqdm import tqdm
 from multiprocessing import Pool
 import re
 import time
+import ffmpeg
+import random
 
 # Assuming envs.utils.parse_hdf5 and api are available in the python path
 from envs.utils.parse_hdf5 import read_hdf5
@@ -28,7 +30,6 @@ PROMPT_DICT = {
     "hanging_mug": "using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
     "lift_pot": "using both arms, lift the pot.",
     "pick_diverse_bottles":"using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
-    "place_bread_basket":"if there is one bread on the table, grab the bread and put it in the basket, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the basket.",
     "blocks_ranking_rgb":"using both arms, place the red block, green block, and blue block in the order of red, green, and blue from left to right, placing in a row.",
     "blocks_ranking_size":"using both arms, move the blocks to the center of the table, and arrange them from largest to smallest, from left to right.",
     "pick_dual_bottles":"using both arms, pick up two bottles with one arm, and pick up another bottle with the other arm.",
@@ -80,9 +81,10 @@ SINGLE_ARM_DICT = {
 }
 
 
-def generate_caption(task_name, qpos_path, video_path_for_api, use_api_caption, episode_idx):
-    """Generates a caption for a given task and episode."""
-    if use_api_caption:
+def generate_caption(task_name, qpos_path, episode_idx, caption_source, source_instruction_path):
+    """Generates a caption for a given task and episode based on the specified source."""
+
+    if caption_source == 'api':
         # TODO: This part requires cv2 to read frames for the API.
         # This is a placeholder as we removed the direct cv2 dependency for simplicity.
         # To enable this, video reading logic would be needed here.
@@ -95,48 +97,65 @@ def generate_caption(task_name, qpos_path, video_path_for_api, use_api_caption, 
         # caption = generate_caption_with_concatenated_images(images_for_api, re.sub(r'^\d+_|_\d+$', '', task_name).replace('_', ' '))[0]
         return "Caption from API (not implemented)"
 
-    # --- Generate caption from local dictionaries ---
-    if task_name in PROMPT_DICT:
-        return PROMPT_DICT[task_name]
-    
-    if task_name in SINGLE_ARM_DICT:
-        base_caption = SINGLE_ARM_DICT[task_name]
+    if caption_source == 'instruction_json':
+        if not source_instruction_path or not os.path.exists(source_instruction_path):
+            print(f"  - Warning: Instruction JSON not found at {source_instruction_path}. Cannot generate caption.")
+            return ""
         try:
-            qpos_data = torch.load(qpos_path, map_location='cpu')
-            data_subset = qpos_data[:30]  # Analyze first 30 frames
-            left_std = data_subset[:, :7].std(dim=0).sum().item()
-            right_std = data_subset[:, 7:].std(dim=0).sum().item()
-            prefix = "using left arm, " if left_std > right_std else "using right arm, "
-            return prefix + base_caption
-        except Exception as e:
-            print(f"  - Warning: Could not process qpos for {task_name} ep {episode_idx} to determine arm. {e}")
-            return base_caption  # Fallback to base caption
-
-    # Special handling for specific tasks
-    if task_name == "place_bread_basket":
-        base_caption  = PROMPT_DICT.get(task_name)
-        try:
-            qpos_data = torch.load(qpos_path, map_location='cpu')
-            data_subset = qpos_data[:30]
-            left_std = data_subset[:, :7].std(dim=0).sum().item()
-            right_std = data_subset[:, 7:].std(dim=0).sum().item()
-            MOVEMENT_THRESHOLD = 0.1
-            is_dual_arm = (left_std > MOVEMENT_THRESHOLD and right_std > MOVEMENT_THRESHOLD)
-            if is_dual_arm:
-                return "using both arms, simultaneously grab up two breads and put them in the basket."
+            with open(source_instruction_path, 'r') as f:
+                data = json.load(f)
+            seen_captions = data.get("seen")
+            if seen_captions and isinstance(seen_captions, list) and len(seen_captions) > 0:
+                return random.choice(seen_captions)
             else:
-                prefix = "using left arm, " if left_std > right_std else "using right arm, "
-                return prefix + "grab the bread and put it in the basket."
+                print(f"  - Warning: 'seen' key is missing, empty, or not a list in {source_instruction_path}.")
+                return ""
         except Exception as e:
-            print(f"  - Warning: Qpos processing failed for {task_name} ep {episode_idx}. {e}")
-            return base_caption # Fallback
+            print(f"  - Warning: Could not read or parse instruction JSON {source_instruction_path}: {e}")
+            return ""
+
+    if caption_source == 'prompt_dict':
+        # --- Generate caption from local dictionaries ---
+        if task_name in PROMPT_DICT:
+            return "using both arm, " + PROMPT_DICT[task_name]
+        
+        if task_name in SINGLE_ARM_DICT:
+            base_caption = SINGLE_ARM_DICT[task_name]
+            try:
+                qpos_data = torch.load(qpos_path, map_location='cpu')
+                data_subset = qpos_data[:30]  # Analyze first 30 frames
+                left_std = data_subset[:, :7].std(dim=0).sum().item()
+                right_std = data_subset[:, 7:].std(dim=0).sum().item()
+                prefix = "using left arm, " if left_std > right_std else "using right arm, "
+                return prefix + base_caption
+            except Exception as e:
+                print(f"  - Warning: Could not process qpos for {task_name} ep {episode_idx} to determine arm. {e}")
+                return base_caption  # Fallback to base caption
+
+        # Special handling for specific tasks
+        if task_name == "place_bread_basket":
+            base_caption  = PROMPT_DICT.get(task_name)
+            try:
+                qpos_data = torch.load(qpos_path, map_location='cpu')
+                data_subset = qpos_data[:30]
+                left_std = data_subset[:, :7].std(dim=0).sum().item()
+                right_std = data_subset[:, 7:].std(dim=0).sum().item()
+                MOVEMENT_THRESHOLD = 0.1
+                is_dual_arm = (left_std > MOVEMENT_THRESHOLD and right_std > MOVEMENT_THRESHOLD)
+                if is_dual_arm:
+                    return "using both arms, simultaneously grab up two breads and put them in the basket."
+                else:
+                    prefix = "using left arm, " if left_std > right_std else "using right arm, "
+                    return prefix + "grab the bread and put it in the basket."
+            except Exception as e:
+                print(f"  - Warning: Qpos processing failed for {task_name} ep {episode_idx}. {e}")
+                return base_caption # Fallback
 
     print(f"  - Warning: No caption rule found for task '{task_name}'.")
-    raise ValueError(f"No caption rule found for task '{task_name}'. Please add it to the PROMPT_DICT or SINGLE_ARM_DICT.")
-    return ""
+    raise ValueError(f"No caption rule found for task '{task_name}'.")
 
 
-def process_task(task_data_path, output_dir, task_name, use_api_caption):
+def process_task(task_data_path, output_dir, task_name, caption_source):
     """
     Processes a single task: extracts actions, copies videos, generates captions,
     and creates a JSON index.
@@ -166,9 +185,12 @@ def process_task(task_data_path, output_dir, task_name, use_api_caption):
         episode_name = hdf5_filename.split('.')[0]
         episode_idx = int(episode_name.replace("episode", ""))
 
-        # 1. Process HDF5 to create .pt file
+        # 1. Unify episode naming scheme to episode_{idx}
+        output_episode_base_name = f"episode_{episode_idx}"
+
+        # 2. Process HDF5 to create .pt file
         hdf5_file_path = os.path.join(hdf5_dir, hdf5_filename)
-        output_pt_path = os.path.join(output_task_dir, f"{episode_name}_qpos.pt")
+        output_pt_path = os.path.join(output_task_dir, f"{output_episode_base_name}_qpos.pt")
         try:
             data_dict = read_hdf5(hdf5_file_path)
             if 'joint_action' in data_dict and 'vector' in data_dict['joint_action']:
@@ -182,30 +204,43 @@ def process_task(task_data_path, output_dir, task_name, use_api_caption):
             print(f"  - Error processing HDF5 file {hdf5_filename}: {e}")
             continue
 
-        # 2. Copy video file
+        # 3. Copy video file
         source_video_path = os.path.join(video_dir, f"{episode_name}.mp4")
-        dest_video_path = os.path.join(output_task_dir, f"{episode_name}.mp4")
+        dest_video_path = os.path.join(output_task_dir, f"{output_episode_base_name}.mp4")
         if os.path.exists(source_video_path):
             shutil.copy(source_video_path, dest_video_path)
         else:
             print(f"  - Warning: Video file not found at {source_video_path}. Cannot copy.")
             continue # If video is missing, no point in continuing for this episode
 
-        # 3. Generate caption
-        caption = generate_caption(task_name, output_pt_path, dest_video_path, use_api_caption, episode_idx)
+        # 4. Generate caption
+        source_instruction_path = os.path.join(task_data_path, "instructions", f"{episode_name}.json")
+        caption = generate_caption(task_name, output_pt_path, episode_idx, caption_source, source_instruction_path)
 
-        # 4. Add entry to JSON data
-        relative_video_path = os.path.join(task_name, f"{episode_name}.mp4")
-        # Note: width, height, and time are placeholders as we are not reading video frames.
+        # 5. Get video metadata and add entry to JSON
+        try:
+            probe = ffmpeg.probe(dest_video_path)
+            video_info = next((s for s in probe['streams'] if s['codec_type'] == 'video'), None)
+            if video_info:
+                duration = float(video_info.get('duration', -1))
+                width = int(video_info.get('width', -1))
+                height = int(video_info.get('height', -1))
+            else:
+                duration, width, height = -1, -1, -1
+        except Exception as e:
+            print(f"  - Warning: Could not probe video file {dest_video_path}: {e}")
+            duration, width, height = -1, -1, -1
+
+        relative_video_path = os.path.join(task_name, f"{output_episode_base_name}.mp4")
         task_json_data.append({
             "video_path": relative_video_path,
             "caption": caption,
-            "width": 640, # Placeholder
-            "height": 480, # Placeholder
-            "time": -1 # Placeholder
+            "width": width,
+            "height": height,
+            "time": duration
         })
 
-    # 5. Write the JSON file for the entire task
+    # 6. Write the JSON file for the entire task
     if task_json_data:
         output_json_path = os.path.join(output_dir, f"{task_name}.json")
         with open(output_json_path, "w") as f:
@@ -262,14 +297,20 @@ def main():
     parser.add_argument("src_dir", type=str, help="Source directory for the dataset (the root).")
     parser.add_argument("dst_dir", type=str, help="Destination directory for the processed data.")
     parser.add_argument("task_config", type=str, help="Task configuration subdirectory name (e.g., 'expert_demos').")
-    parser.add_argument("--use-api-caption", action="store_true", help="Use OpenAI API to generate captions instead of local prompts.")
+    parser.add_argument(
+        "--caption-source",
+        type=str,
+        default="prompt_dict",
+        choices=["prompt_dict", "instruction_json", "api"],
+        help="Source for generating captions: 'prompt_dict' (local templates), 'instruction_json' (from source files), or 'api'."
+    )
     parser.add_argument("--check-integrity", action="store_true", help="Run an integrity check after processing.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing processed data and re-process all tasks.")
     args = parser.parse_args()
 
-    if args.use_api_caption:
+    if args.caption_source == 'api':
         if 'OPENAI_API_BASE' not in os.environ or 'OPENAI_API_KEY' not in os.environ:
-            print("Warning: --use-api-caption is set, but OPENAI_API_BASE or OPENAI_API_KEY environment variables are not found.")
+            print("Warning: --caption-source='api' is set, but OPENAI_API_BASE or OPENAI_API_KEY environment variables are not found.")
     
     dataset_dir = args.src_dir
     output_base_dir = args.dst_dir
@@ -295,7 +336,7 @@ def main():
             continue
         
         if os.path.isdir(task_data_path):
-            process_task(task_data_path, output_base_dir, task_name, args.use_api_caption)
+            process_task(task_data_path, output_base_dir, task_name, args.caption_source)
 
     if args.check_integrity:
         check_integrity(output_base_dir)
