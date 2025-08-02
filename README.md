@@ -36,7 +36,7 @@ data/{task_name}/video/episode_{idx}.mp4
 
 Restructure the data directoires (copy to dst path), add prompt:
 ```
-python script/data_preprocess/prepare_data4vidar.py
+python script/data_preprocess/prepare_data4vidar.py {src_dataset} {dst_dataset} {task_config}
 ```
 
 ### [Vidar Policy Evalution]
