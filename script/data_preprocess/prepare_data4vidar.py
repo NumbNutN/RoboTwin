@@ -25,27 +25,27 @@ from api import generate_caption_with_concatenated_images
 
 PROMPT_DICT = {
     # bimanual tasks
-    "grab_roller": "using both arms, grab the roller on the table.",
-    "handover_block": "using both arms, using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
-    "hanging_mug": "using both arms, using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
-    "lift_pot": "using both arms, lift the pot.",
-    "pick_diverse_bottles":"using both arms, pick up one bottle with one arm, and pick up another bottle with the other arm.",
-    "blocks_ranking_rgb":"using both arms, place the red block, green block, and blue block in the order of red, green, and blue from left to right, placing in a row.",
-    "blocks_ranking_size":"using both arms, move the blocks to the center of the table, and arrange them from largest to smallest, from left to right.",
-    "pick_dual_bottles":"using both arms, pick up two bottles with one arm, and pick up another bottle with the other arm.",
-    "place_bread_skillet":"using both arms, if there is one bread on the table, grab the bread and put it in the skillet, if there are two breads on the table, using both arms, simultaneously grab up two breads and put them in the skillet.",
-    "place_burger_fries":"using both arms, pick the hamburg and frenchfries and put them onto the tray.",
-    "place_can_basket":"using both arms, Use one arm to pick up the can and another arm place it in the basket.",
-    "place_cans_plasticbox":"using both arms, pick and place cans into plasticbox.",
-    "place_dual_shoes":"using both arms, pick up the two shoes on the table and put them in the shoebox, with the shoe tip pointing to the left.",
-    "place_object_basket":"using both arms, one arm to grab the target object and put it in the basket, then use the other arm to grab the basket, and finally move the basket slightly away.",
-    "put_bottles_dustbin":"using both arms, grab the bottles and put them into the dustbin to the left of the table.",
-    "put_object_cabinet":"using both arms, use one arm to open the cabinet's drawer, and use another arm to put the object on the table to the drawer.",
-    "scan_object":"using both arms, use one arm to pick the scanner and use the other arm to pick the object, and use the scanner to scan the object.",
-    "stack_bowls_two":"using both arms, stack the two bowls on top of each other.",
-    "stack_bowls_three":"using both arms, stack the three bowls on top of each other.",
-    "stack_blocks_two":"using both arms, move the red blocks to the center of the table, and using another arm to stack the geen block on the red block.",
-    "stack_blocks_three":"using both arms, move the blocks to the center of the table, and stack the blue block on the green block, and the green block on the red block"
+    "grab_roller": "grab the roller on the table.",
+    "handover_block": "using left arm to grasp the red block on the table, handover it to the right arm and place it on the blue pad.",
+    "hanging_mug": "using left arm to pick the mug on the table, rotate the mug and put the mug down in the middle of the table, use the right arm to pick the mug and hang it onto the rack.",
+    "lift_pot": "lift the pot.",
+    "pick_diverse_bottles":"pick up one bottle with one arm, and pick up another bottle with the other arm.",
+    "blocks_ranking_rgb":"place the red block, green block, and blue block in the order of red, green, and blue from left to right, placing in a row.",
+    "blocks_ranking_size":"move the blocks to the center of the table, and arrange them from largest to smallest, from left to right.",
+    "pick_dual_bottles":"pick up two bottles with one arm, and pick up another bottle with the other arm.",
+    "place_bread_skillet":"if there is one bread on the table, grab the bread and put it in the skillet, if there are two breads on the table, simultaneously grab up two breads and put them in the skillet.",
+    "place_burger_fries":"pick the hamburg and frenchfries and put them onto the tray.",
+    "place_can_basket":"Use one arm to pick up the can and another arm place it in the basket.",
+    "place_cans_plasticbox":"pick and place cans into plasticbox.",
+    "place_dual_shoes":"pick up the two shoes on the table and put them in the shoebox, with the shoe tip pointing to the left.",
+    "place_object_basket":"one arm to grab the target object and put it in the basket, then use the other arm to grab the basket, and finally move the basket slightly away.",
+    "put_bottles_dustbin":"grab the bottles and put them into the dustbin to the left of the table.",
+    "put_object_cabinet":"use one arm to open the cabinet's drawer, and use another arm to put the object on the table to the drawer.",
+    "scan_object":"use one arm to pick the scanner and use the other arm to pick the object, and use the scanner to scan the object.",
+    "stack_bowls_two":"stack the two bowls on top of each other.",
+    "stack_bowls_three":"stack the three bowls on top of each other.",
+    "stack_blocks_two":"move the red blocks to the center of the table, and using another arm to stack the geen block on the red block.",
+    "stack_blocks_three":"move the blocks to the center of the table, and stack the blue block on the green block, and the green block on the red block"
 }
 
 SINGLE_ARM_DICT = {
@@ -106,7 +106,8 @@ def generate_caption(task_name, qpos_path, episode_idx, caption_source, source_i
                 data = json.load(f)
             seen_captions = data.get("seen")
             if seen_captions and isinstance(seen_captions, list) and len(seen_captions) > 0:
-                return random.choice(seen_captions)
+                caption = random.choice(seen_captions)
+                return caption
             else:
                 print(f"  - Warning: 'seen' key is missing, empty, or not a list in {source_instruction_path}.")
                 return ""
@@ -117,7 +118,7 @@ def generate_caption(task_name, qpos_path, episode_idx, caption_source, source_i
     if caption_source == 'prompt_dict':
         # --- Generate caption from local dictionaries ---
         if task_name in PROMPT_DICT:
-            return "using both arm, " + PROMPT_DICT[task_name]
+            return "using both arms, " + PROMPT_DICT[task_name]
         
         if task_name in SINGLE_ARM_DICT:
             base_caption = SINGLE_ARM_DICT[task_name]
@@ -152,7 +153,59 @@ def generate_caption(task_name, qpos_path, episode_idx, caption_source, source_i
                 return base_caption # Fallback
 
     print(f"  - Warning: No caption rule found for task '{task_name}'.")
-    raise ValueError(f"No caption rule found for task '{task_name}'.")
+    return None # Return None instead of raising an error
+
+
+def update_captions_for_task(output_dir, task_name, caption_source, task_data_path):
+    """
+    Updates only the captions in an existing task's JSON file.
+    """
+    output_task_dir = os.path.join(output_dir, task_name)
+    output_json_path = os.path.join(output_dir, f"{task_name}.json")
+
+    if not os.path.exists(output_json_path):
+        print(f"Skipping '{task_name}': --caption-only specified but no existing JSON found at {output_json_path}.")
+        return
+
+    print(f"\nUpdating captions only for task: {task_name}")
+    try:
+        with open(output_json_path, 'r') as f:
+            task_json_data = json.load(f)
+    except Exception as e:
+        print(f"  - Error reading JSON file {output_json_path}: {e}")
+        return
+    
+    updated_json_data = []
+    for item in tqdm(task_json_data, desc=f"  - Episodes in {task_name}"):
+        video_path_in_json = item.get('video_path')
+        if not video_path_in_json:
+            updated_json_data.append(item) # Keep item as is if no path
+            continue
+
+        base_name = os.path.basename(video_path_in_json).rsplit('.', 1)[0] # e.g., "episode_123"
+        try:
+            episode_idx = int(base_name.replace("episode_", ""))
+            source_episode_name = f"episode{episode_idx}" # Original source file name doesn't have underscore
+        except ValueError:
+            print(f"  - Warning: Could not parse episode index from '{base_name}'. Skipping caption update for this entry.")
+            updated_json_data.append(item)
+            continue
+        
+        qpos_path = os.path.join(output_task_dir, f"{base_name}_qpos.pt")
+        source_instruction_path = os.path.join(task_data_path, "instructions", f"{source_episode_name}.json")
+
+        new_caption = generate_caption(task_name, qpos_path, episode_idx, caption_source, source_instruction_path)
+        
+        if new_caption is not None:
+            item['caption'] = new_caption
+        else:
+            print(f"  - Caption generation failed for {base_name}, keeping old caption.")
+        
+        updated_json_data.append(item)
+
+    with open(output_json_path, "w") as f:
+        json.dump(updated_json_data, f, indent=4)
+    print(f"  - Updated JSON captions at: {output_json_path}")
 
 
 def process_task(task_data_path, output_dir, task_name, caption_source):
@@ -306,40 +359,67 @@ def main():
     )
     parser.add_argument("--check-integrity", action="store_true", help="Run an integrity check after processing.")
     parser.add_argument("--overwrite", action="store_true", help="Overwrite existing processed data and re-process all tasks.")
+    parser.add_argument("--caption-only", action="store_true", help="Only update captions in existing JSON files, do not process files.")
     args = parser.parse_args()
 
     if args.caption_source == 'api':
         if 'OPENAI_API_BASE' not in os.environ or 'OPENAI_API_KEY' not in os.environ:
             print("Warning: --caption-source='api' is set, but OPENAI_API_BASE or OPENAI_API_KEY environment variables are not found.")
     
-    dataset_dir = args.src_dir
-    output_base_dir = args.dst_dir
-    
-    if not os.path.isdir(dataset_dir):
-        print(f"Error: Source dataset directory not found at {dataset_dir}")
-        return
-        
-    os.makedirs(output_base_dir, exist_ok=True)
-    print(f"Starting dataset processing for task config: '{args.task_config}'")
-    print(f"Source root: {dataset_dir}")
-    print(f"Outputting to: {output_base_dir}")
+    if args.caption_only:
+        print("--- Running in caption-only mode ---")
+        if not os.path.isdir(args.src_dir):
+             print(f"Error: Source directory '{args.src_dir}' not found, which may be required for caption generation.")
+             return
+        if not os.path.isdir(args.dst_dir):
+             print(f"Error: Destination directory '{args.dst_dir}' not found. Nothing to update.")
+             return
 
-    # Iterate over each high-level task folder in the dataset directory.
-    task_names = sorted(os.listdir(dataset_dir))
-    for task_name in task_names:
-        task_data_path = os.path.join(dataset_dir, task_name, args.task_config)
-        
-        # Skip already processed tasks unless --overwrite is specified
-        output_json_path = os.path.join(output_base_dir, f"{task_name}.json")
-        if not args.overwrite and os.path.exists(output_json_path):
-            print(f"Skipping task '{task_name}': Already processed. Use --overwrite to re-process.")
-            continue
-        
-        if os.path.isdir(task_data_path):
-            process_task(task_data_path, output_base_dir, task_name, args.caption_source)
+        for filename in sorted(os.listdir(args.dst_dir)):
+            if not filename.endswith('.json'):
+                continue
+            
+            task_name = filename.rsplit('.', 1)[0]
+            task_data_path = os.path.join(args.src_dir, task_name, args.task_config)
 
-    if args.check_integrity:
-        check_integrity(output_base_dir)
+            if not os.path.isdir(os.path.join(args.dst_dir, task_name)):
+                print(f"Warning: Corresponding task data folder '{task_name}' not found in destination. Skipping.")
+                continue
+            if not os.path.isdir(task_data_path) and args.caption_source == 'instruction_json':
+                print(f"Warning: Corresponding source data folder not found at '{task_data_path}'. Skipping caption update for '{task_name}'.")
+                continue
+
+            update_captions_for_task(args.dst_dir, task_name, args.caption_source, task_data_path)
+    else:
+        # Full processing mode
+        dataset_dir = args.src_dir
+        output_base_dir = args.dst_dir
+        
+        if not os.path.isdir(dataset_dir):
+            print(f"Error: Source dataset directory not found at {dataset_dir}")
+            return
+            
+        os.makedirs(output_base_dir, exist_ok=True)
+        print(f"Starting dataset processing for task config: '{args.task_config}'")
+        print(f"Source root: {dataset_dir}")
+        print(f"Outputting to: {output_base_dir}")
+
+        # Iterate over each high-level task folder in the dataset directory.
+        task_names = sorted(os.listdir(dataset_dir))
+        for task_name in task_names:
+            task_data_path = os.path.join(dataset_dir, task_name, args.task_config)
+            
+            # Skip already processed tasks unless --overwrite is specified
+            output_json_path = os.path.join(output_base_dir, f"{task_name}.json")
+            if not args.overwrite and os.path.exists(output_json_path):
+                print(f"Skipping task '{task_name}': Already processed. Use --overwrite to re-process.")
+                continue
+            
+            if os.path.isdir(task_data_path):
+                process_task(task_data_path, output_base_dir, task_name, args.caption_source)
+
+        if args.check_integrity:
+            check_integrity(output_base_dir)
     
     print("\nDataset processing finished.")
 
