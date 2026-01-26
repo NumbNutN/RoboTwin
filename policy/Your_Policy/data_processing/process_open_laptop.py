@@ -16,6 +16,7 @@ from envs.open_laptop import open_laptop
 from envs._GLOBAL_CONFIGS import CONFIGS_PATH
 from envs._base_task import Base_Task
 from envs.utils.save_file import save_pkl
+from envs.utils import ArmTag, get_face_prod
 from envs.utils.pkl2hdf5 import (
     load_pkl_file, 
     parse_dict_structure, 
@@ -41,6 +42,141 @@ class OpenLaptopDataGen(open_laptop):
         self.start_qpos = None
         self.branch_idx = 0
         self.neg_step_idx = 0
+        
+        # New: Counters and Configs for Phase 2
+        self.sample_interval = 2 # Steps between negative samples
+        self.pos_step_counter = 0
+
+    def take_dense_action(self, control_seq, save_freq=-1):
+        """
+        Overridden to inject Negative Sampling logic during execution.
+        """
+        # Unpack control sequence
+        left_arm, left_gripper, right_arm, right_gripper = (
+            control_seq["left_arm"],
+            control_seq["left_gripper"],
+            control_seq["right_arm"],
+            control_seq["right_gripper"],
+        )
+
+        save_freq = self.save_freq if save_freq == -1 else save_freq
+        
+        # Initial Save
+        if save_freq != None:
+            self._take_picture()
+
+        max_control_len = 0
+        if left_arm is not None:
+             max_control_len = max(max_control_len, left_arm["position"].shape[0])
+        if left_gripper is not None:
+             max_control_len = max(max_control_len, left_gripper["num_step"])
+        if right_arm is not None:
+             max_control_len = max(max_control_len, right_arm["position"].shape[0])
+        if right_gripper is not None:
+             max_control_len = max(max_control_len, right_gripper["num_step"])
+
+        for control_idx in range(max_control_len):
+
+             # --- INJECTED NEGATIVE SAMPLING LOGIC START ---
+             # Only sample if we are in positive mode and hit the interval
+             if self.sample_type == 'positive':
+                 # We simply use the current global frame index or specific counter
+                 # Using internal counter to be consistent
+                 if self.pos_step_counter % self.sample_interval == 0:
+                     # 1. Save Current Good State
+                     state_backup = self.get_state()
+                     
+                     # 2. Rollout Negative Sample (using helper)
+                     # Using FRAME_IDX as branch_idx for traceability
+                     self.sample_neg_from(duration=10, branch_idx=self.FRAME_IDX) 
+                     
+                     # 3. Restore State
+                     self.set_state(state_backup)
+                     
+                 self.pos_step_counter += 1
+             # --- INJECTED NEGATIVE SAMPLING LOGIC END ---
+
+             if (left_arm is not None and control_idx < left_arm["position"].shape[0]): 
+                 # control left arm
+                 self.robot.set_arm_joints(
+                     left_arm["position"][control_idx],
+                     left_arm["velocity"][control_idx],
+                     "left",
+                 )
+
+             if left_gripper is not None and control_idx < left_gripper["num_step"]:
+                 self.robot.set_gripper(
+                     left_gripper["result"][control_idx],
+                     "left",
+                     left_gripper["per_step"],
+                 ) 
+
+             if (right_arm is not None and control_idx < right_arm["position"].shape[0]): 
+                 # control right arm
+                 self.robot.set_arm_joints(
+                     right_arm["position"][control_idx],
+                     right_arm["velocity"][control_idx],
+                     "right",
+                 )
+
+             if right_gripper is not None and control_idx < right_gripper["num_step"]:
+                 self.robot.set_gripper(
+                     right_gripper["result"][control_idx],
+                     "right",
+                     right_gripper["per_step"],
+                 ) 
+
+             self.scene.step()
+
+             if self.render_freq and control_idx % self.render_freq == 0:
+                 self._update_render()
+                 if hasattr(self, 'viewer') and self.viewer:
+                    self.viewer.render()
+
+             if save_freq != None and control_idx % save_freq == 0:
+                 self._update_render()
+                 self._take_picture()
+
+        # Final Save
+        if save_freq != None:
+            self._take_picture()
+
+        return True
+
+    def play_once(self):
+        """
+        Rewritten play_once to support two-stage data generation structure.
+        """
+        face_prod = get_face_prod(self.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
+        arm_tag = ArmTag("left" if face_prod > 0 else "right")
+        self.arm_tag = arm_tag
+
+        # --- Phase 1: Grasp Laptop ---
+        # self.sample_interval = 2 # High frequency for grasp approach
+        self.move(self.grasp_actor(self.laptop, arm_tag=arm_tag, pre_grasp_dis=0.08, contact_point_id=0))
+
+        # --- Phase 2: Rotate Lid ---
+        # self.sample_interval = 1 # Very high frequency for rotation
+        for _ in range(15):
+            # Get target rotation pose
+            self.move(
+                self.grasp_actor(
+                    self.laptop,
+                    arm_tag=arm_tag,
+                    pre_grasp_dis=0.0,
+                    grasp_dis=0.0,
+                    contact_point_id=1,
+                ))
+            if not self.plan_success:
+                break
+            if self.check_success(target=0.5):
+                break
+
+        self.info["info"] = {
+            "{A}": f"{self.model_name}/base{self.model_id}",
+            "{a}": str(arm_tag),
+        }
+        return self.info
 
     def _take_picture(self):
         """
