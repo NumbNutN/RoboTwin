@@ -16,6 +16,13 @@ from envs.open_laptop import open_laptop
 from envs._GLOBAL_CONFIGS import CONFIGS_PATH
 from envs._base_task import Base_Task
 from envs.utils.save_file import save_pkl
+from envs.utils.pkl2hdf5 import (
+    load_pkl_file, 
+    parse_dict_structure, 
+    append_data_to_structure, 
+    create_hdf5_from_dict, 
+    images_to_video
+)
 
 # Define new class for Data Generation
 class OpenLaptopDataGen(open_laptop):
@@ -155,6 +162,125 @@ class OpenLaptopDataGen(open_laptop):
         # Reset flags (State restoration is caller's responsibility)
         self.sample_type = 'positive'
         self.start_qpos = None
+
+    def merge_pkl_to_hdf5_video(self):
+        """
+        Synthesize .pkl files (positive & negative) into a structured HDF5 and MP4 video.
+        Structure:
+          - / (Root): Positive Trajectory Data
+            - observation/
+            ...
+          - /negative_trajs/branch_{idx}: Negative Trajectories
+            - observation/
+            - ...
+            - attrs['start_qpos']: Anchor state
+        """
+        if not self.save_data:
+            return
+
+        cache_path = self.folder_path["cache"]
+        target_file_path = f"{self.save_dir}/data/episode{self.ep_num}.hdf5"
+        target_video_path = f"{self.save_dir}/video/episode{self.ep_num}.mp4"
+
+        os.makedirs(f"{self.save_dir}/data", exist_ok=True)
+        os.makedirs(f"{self.save_dir}/video", exist_ok=True)
+
+        print(f"Processing cache to HDF5: {cache_path}")
+
+        # 1. Classify files
+        all_files = sorted(os.listdir(cache_path))
+        pos_files = []
+        neg_files = {}  # branch_idx -> list of (step_idx, path)
+
+        for fname in all_files:
+            if not fname.endswith(".pkl"):
+                continue
+            path = os.path.join(cache_path, fname)
+            
+            if fname.startswith("pos_"):
+                # pos_{index}.pkl
+                try:
+                     # e.g., pos_0.pkl
+                    idx = int(fname.split('_')[1].split('.')[0])
+                    pos_files.append((idx, path))
+                except ValueError:
+                    print(f"Skipping malformed file: {fname}")
+
+            elif fname.startswith("neg_branch"):
+                # neg_branch{b_idx}_{step}.pkl
+                try:
+                    parts = fname.replace("neg_branch", "").replace(".pkl", "").split('_')
+                    if len(parts) == 2:
+                        b_idx = int(parts[0])
+                        step_idx = int(parts[1])
+                        if b_idx not in neg_files:
+                            neg_files[b_idx] = []
+                        neg_files[b_idx].append((step_idx, path))
+                except ValueError:
+                    print(f"Skipping malformed file: {fname}")
+
+        # 2. Process Positive Trajectory (Main Dataset)
+        pos_files.sort(key=lambda x: x[0])
+        sorted_pos_paths = [x[1] for x in pos_files]
+        
+        if not sorted_pos_paths:
+            print("Warning: No positive trajectory files found!")
+            return
+
+        # Initialize Main Data Structure using first frame
+        full_data = parse_dict_structure(load_pkl_file(sorted_pos_paths[0]))
+        
+        # Aggregate all positive frames
+        for pkl_path in sorted_pos_paths:
+            data = load_pkl_file(pkl_path)
+            append_data_to_structure(full_data, data)
+
+        # 3. Create HDF5 File
+        with h5py.File(target_file_path, "w") as f:
+            # Write Positive Trajectory to Root
+            create_hdf5_from_dict(f, full_data)
+            
+            # Write Negative Trajectories to Subgroups
+            if neg_files:
+                neg_grp = f.create_group("negative_trajs")
+                
+                for b_idx in sorted(neg_files.keys()):
+                    steps = sorted(neg_files[b_idx], key=lambda x: x[0])
+                    step_paths = [x[1] for x in steps]
+                    
+                    if not step_paths: continue
+
+                    # Initialize Branch Data Structure
+                    first_neg_frame = load_pkl_file(step_paths[0])
+                    branch_data = parse_dict_structure(first_neg_frame)
+                    
+                    # Aggregate Branch Frames
+                    for pkl_path in step_paths:
+                        data = load_pkl_file(pkl_path)
+                        append_data_to_structure(branch_data, data)
+                    
+                    # Create Subgroup
+                    branch_subgrp = neg_grp.create_group(f"branch_{b_idx}")
+                    create_hdf5_from_dict(branch_subgrp, branch_data)
+                    
+                    # Save anchor metadata (from first frame of this branch)
+                    if 'start_qpos' in first_neg_frame:
+                         # Ensure it's stored as attribute or dataset
+                         # start_qpos is same for all steps in branch, so taking first is fine
+                         # But check if it's empty
+                         qpos_val = first_neg_frame['start_qpos']
+                         if len(qpos_val) > 0:
+                             branch_subgrp.attrs['start_qpos'] = qpos_val
+
+        # 4. Generate Video (Positive Trajectory Only)
+        try:
+            if "observation" in full_data and "head_camera" in full_data["observation"]:
+                rgb_seq = np.array(full_data["observation"]["head_camera"]["rgb"])
+                # images_to_video expects a numpy array of images
+                images_to_video(rgb_seq, out_path=target_video_path)
+                print(f"Video saved to {target_video_path}")
+        except Exception as e:
+            print(f"Error creating video: {e}")
 
 class DataProcessor:
     def __init__(self, task_name, root_dir, output_dir):
