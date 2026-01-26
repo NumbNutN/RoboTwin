@@ -24,6 +24,12 @@ from envs.utils.pkl2hdf5 import (
     images_to_video
 )
 
+def get_embodiment_config(robot_file):
+    robot_config_file = os.path.join(robot_file, "config.yml")
+    with open(robot_config_file, "r", encoding="utf-8") as f:
+        embodiment_args = yaml.load(f.read(), Loader=yaml.FullLoader)
+    return embodiment_args
+
 # Define new class for Data Generation
 class OpenLaptopDataGen(open_laptop):
     """
@@ -284,11 +290,13 @@ class OpenLaptopDataGen(open_laptop):
 
 class DataProcessor:
     def __init__(self, task_name, root_dir, output_dir):
+        self.args = {}
         self.task_name = task_name
+        self.task_config = "demo_clean" # Changed from aloha_default
         self.root_dir = root_dir
         self.output_dir = output_dir
         os.makedirs(output_dir, exist_ok=True)
-        
+
         # Initialize Simulator for Negative Sampling
         self.init_sim()
 
@@ -298,24 +306,57 @@ class DataProcessor:
         self.env = OpenLaptopDataGen() # Use our extended class
         
         # Load embodiment config
-        # (Assuming we have correct args passed or defaulted within class, 
-        #  but typically we need setup_demo call with args)
+        config_path = f"./task_config/{self.task_config}.yml"
+        with open(config_path, "r", encoding="utf-8") as f:
+            self.args = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+        self.args['task_name'] = self.task_name
+
+        # Setup embodiment
+        embodiment_type = self.args.get("embodiment", ["aloha"]) # Default to aloha if not present
+        embodiment_config_path = os.path.join(CONFIGS_PATH, "_embodiment_config.yml")
+        with open(embodiment_config_path, "r", encoding="utf-8") as f:
+            _embodiment_types = yaml.load(f.read(), Loader=yaml.FullLoader)
+            
+        def get_embodiment_file(etype):
+            return _embodiment_types[etype]["file_path"]
+
+        if len(embodiment_type) == 1:
+            self.args["left_robot_file"] = get_embodiment_file(embodiment_type[0])
+            self.args["right_robot_file"] = get_embodiment_file(embodiment_type[0])
+            self.args["dual_arm_embodied"] = True
+        elif len(embodiment_type) == 3:
+            self.args["left_robot_file"] = get_embodiment_file(embodiment_type[0])
+            self.args["right_robot_file"] = get_embodiment_file(embodiment_type[1])
+            self.args["embodiment_dis"] = embodiment_type[2]
+            self.args["dual_arm_embodied"] = False
+
+        self.args["left_embodiment_config"] = get_embodiment_config(self.args["left_robot_file"])
+        self.args["right_embodiment_config"] = get_embodiment_config(self.args["right_robot_file"])
         
         # We need to minimally init the task to load robot
         # Since we are replaying, we need consistent embodiment
         # self.env.setup_demo(...) # This requires args.
-        pass
+        self.args['need_plan'] = False
+        self.args['render_freq'] = 0
+        self.args['save_data'] = True
 
-    def run_two_stage_collection(self, args):
+        return
+
+    def run_two_stage_collection(self):
         """
         Main Loop for Data Collection
         """
+
         # Phase 1: Ensure we have seeds/traj (Loaded from disk typically)
         # Assuming args['save_path'] contains _traj_data/episode_X.pkl
         
+        clear_cache_freq = self.args["clear_cache_freq"]
+        st_idx = 0
+
         # Phase 2: Replay and Collect
         
-        seed_list_path = os.path.join(args["save_path"], "seed.txt")
+        seed_list_path = os.path.join(self.args["save_path"], "seed.txt")
         if not os.path.exists(seed_list_path):
             print("No seeds found. Please run collect_data.py first to generate success seeds.")
             return
@@ -336,7 +377,7 @@ class DataProcessor:
                 # 1. Setup Env for Replay
                 # We need to force use_seed=True logic
                 # args need to be compatible
-                self.env.setup_demo(now_ep_num=epid, seed=seed, **args)
+                self.env.setup_demo(now_ep_num=epid, seed=seed, **self.args)
                 
                 # 2. Load Success Trajectory
                 # This corresponds to 'Phase 2' in collect_data
@@ -396,6 +437,8 @@ class DataProcessor:
                 self.env.play_once()
                 
                 self.env.close_env()
+                self.env.merge_pkl_to_hdf5_video()
+                assert self.env.check_success(), "Collect Error"
 
     def step_handler(self, env_instance):
         """
