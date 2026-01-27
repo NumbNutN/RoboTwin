@@ -7,7 +7,6 @@ import pickle
 from tqdm import tqdm
 import sys
 import yaml
-from copy import deepcopy
 
 # Add workspace to path
 sys.path.append(os.getcwd())
@@ -61,8 +60,8 @@ class OpenLaptopDataGen(open_laptop):
 
         save_freq = self.save_freq if save_freq == -1 else save_freq
         
-        # Initial Save
-        if save_freq != None:
+        # Initial Save (Only in Replay Phase)
+        if save_freq != None and not self.need_plan:
             self._take_picture()
 
         max_control_len = 0
@@ -77,9 +76,10 @@ class OpenLaptopDataGen(open_laptop):
 
         for control_idx in range(max_control_len):
 
-             # --- INJECTED NEGATIVE SAMPLING LOGIC START ---
-             # Only sample if we are in positive mode and hit the interval
-             if self.sample_type == 'positive':
+             # --- INJECTED NEGATIVE SAMPLING LOGIC START (Phase 2 Only) ---
+             # We only sample negatives if we are NOT planning (need_plan=False) 
+             # and we are currently tracking a positive trajectory.
+             if not self.need_plan and self.sample_type == 'positive':
                  # We simply use the current global frame index or specific counter
                  # Using internal counter to be consistent
                  if self.pos_step_counter % self.sample_interval == 0:
@@ -133,12 +133,13 @@ class OpenLaptopDataGen(open_laptop):
                  if hasattr(self, 'viewer') and self.viewer:
                     self.viewer.render()
 
-             if save_freq != None and control_idx % save_freq == 0:
+             # Capture Frame (Only in Replay Phase)
+             if save_freq != None and control_idx % save_freq == 0 and not self.need_plan:
                  self._update_render()
                  self._take_picture()
 
-        # Final Save
-        if save_freq != None:
+        # Final Save (Only in Replay Phase)
+        if save_freq != None and not self.need_plan:
             self._take_picture()
 
         return True
@@ -147,16 +148,26 @@ class OpenLaptopDataGen(open_laptop):
         """
         Rewritten play_once to support two-stage data generation structure.
         """
+        # Determine active arm based on geometry (same as original)
         face_prod = get_face_prod(self.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
         arm_tag = ArmTag("left" if face_prod > 0 else "right")
         self.arm_tag = arm_tag
 
-        # --- Phase 1: Grasp Laptop ---
-        # self.sample_interval = 2 # High frequency for grasp approach
+        # --- Phase 1: Grasp Laptop Details ---
+        # If we are in Replay Phase (!need_plan), we set sampling frequency for this segment
+        if not self.need_plan:
+             self.sample_interval = 2 # High frequency for grasp approach
+        
+        # Execute Move: 
+        # In Plan Phase, this plans and saves path.
+        # In Replay Phase, this reads path, executes, and triggers take_dense_action (w/ sampling).
         self.move(self.grasp_actor(self.laptop, arm_tag=arm_tag, pre_grasp_dis=0.08, contact_point_id=0))
 
-        # --- Phase 2: Rotate Lid ---
-        # self.sample_interval = 1 # Very high frequency for rotation
+        # --- Phase 2: Rotate Lid Details ---
+        # If we are in Replay Phase (!need_plan), adjust sampling frequency
+        if not self.need_plan:
+             self.sample_interval = 1 # Very high frequency for rotation interactions
+        
         for _ in range(15):
             # Get target rotation pose
             self.move(
@@ -167,8 +178,12 @@ class OpenLaptopDataGen(open_laptop):
                     grasp_dis=0.0,
                     contact_point_id=1,
                 ))
-            if not self.plan_success:
+            
+            # Phase 1 Planning Check: If planning failed, stop
+            if self.need_plan and not self.plan_success:
                 break
+            
+            # Success Check
             if self.check_success(target=0.5):
                 break
 
