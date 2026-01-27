@@ -23,6 +23,7 @@ from envs.utils.pkl2hdf5 import (
     create_hdf5_from_dict, 
     images_to_video
 )
+from envs.utils.traj_inspector import analyze_trajectory
 
 def get_embodiment_config(robot_file):
     robot_config_file = os.path.join(robot_file, "config.yml")
@@ -43,8 +44,18 @@ class OpenLaptopDataGen(open_laptop):
         self.neg_step_idx = 0
         
         # New: Counters and Configs for Phase 2
-        self.sample_interval = 2 # Steps between negative samples
+        # self.sample_interval = 2 # Steps between negative samples
         self.pos_step_counter = 0
+        self.phase_intervals = {
+            "grasp": 100,
+            "rotate": 50
+        }
+
+    def set_sample_intervals(self, intervals):
+        """
+        Set sampling intervals for different phases
+        """
+        self.phase_intervals.update(intervals)
 
     def take_dense_action(self, control_seq, save_freq=-1):
         """
@@ -89,6 +100,7 @@ class OpenLaptopDataGen(open_laptop):
                      
                      # 2. Rollout Negative Sample (using helper)
                      # Using FRAME_IDX as branch_idx for traceability
+                     print(f"Sample Neg Traj at save index {self.FRAME_IDX} at control index {control_idx} for episode {self.ep_num}")
                      self.sample_neg_from(duration=10, branch_idx=self.FRAME_IDX) 
                      
                      # 3. Restore State
@@ -157,7 +169,7 @@ class OpenLaptopDataGen(open_laptop):
         # --- Phase 1: Grasp Laptop Details ---
         # If we are in Replay Phase (!need_plan), we set sampling frequency for this segment
         if not self.need_plan:
-             self.sample_interval = 2 # High frequency for grasp approach
+             self.sample_interval = self.phase_intervals.get("grasp", 10) # High frequency for grasp approach
         
         # Execute Move: 
         # In Plan Phase, this plans and saves path.
@@ -167,7 +179,7 @@ class OpenLaptopDataGen(open_laptop):
         # --- Phase 2: Rotate Lid Details ---
         # If we are in Replay Phase (!need_plan), adjust sampling frequency
         if not self.need_plan:
-             self.sample_interval = 1 # Very high frequency for rotation interactions
+             self.sample_interval = self.phase_intervals.get("rotate", 5) # Very high frequency for rotation interactions
         
         for _ in range(15):
             # Get target rotation pose
@@ -466,6 +478,11 @@ class DataProcessor:
 
         self.args['task_name'] = self.task_name
         self.args['task_config'] = self.task_config
+        
+        # Enable GUI visualization for Sapien
+        self.args['headless'] = False
+        # If needed, set render frequency to ensure updates
+        # self.args['render_freq'] = 1 
 
         # Setup embodiment
         embodiment_type = self.args.get("embodiment", ["aloha"]) # Default to aloha if not present
@@ -495,7 +512,9 @@ class DataProcessor:
         self.args['need_plan'] = False
         self.args['render_freq'] = 0
         self.args['save_data'] = True
-
+        # TODO config save frequency here
+        self.args['save_freq'] = 10 # Force save every frame to align FRAME_IDX with control steps
+        
         # set new save dir here
         self.args["save_path"] = os.path.join(self.args["save_path"], str(self.args["task_name"]), self.args["task_config"])
 
@@ -531,6 +550,7 @@ class DataProcessor:
         with h5py.File(out_h5_path, "w") as out_f:
         
             for epid, seed in enumerate(seed_list):
+                # TODO Start process a traj
                 print(f"Processing Episode {epid} (Seed {seed})")
                 
                 # 1. Setup Env for Replay
@@ -545,6 +565,47 @@ class DataProcessor:
                 except FileNotFoundError:
                     print(f"Trajectory for ep {epid} not found. Skipping.")
                     continue
+                
+                # Using external tool for analysis (can be called in GDB)
+                analyze_trajectory(traj_data, self.env)
+                # --- Analysis of Trajectory Data ---
+                traj_len = sum(seg['position'].shape[0] for seg in traj_data['left_joint_path'])
+                save_freq = self.env.save_freq if hasattr(self.env, 'save_freq') and self.env.save_freq else 1
+                effective_len = traj_len // save_freq if save_freq > 0 else 0
+                
+                print(f"[Trajectory Info]")
+                print(f"  Total Trajectory Length: {traj_len}")
+                print(f"  Save Frequency: {save_freq}")
+                print(f"  Effective Record Length: {effective_len}")
+                print(f"  Negative Sample Intervals: {getattr(self.env, 'phase_intervals', 'Not Set')}")
+                # -----------------------------------
+
+                # --- Debug: Analyze traj_data structure ---
+                print("\n[DEBUG] traj_data structure:")
+                print(f"  Type: {type(traj_data)}")
+                if isinstance(traj_data, dict):
+                    print(f"  Keys: {list(traj_data.keys())}")
+                    for key, val in traj_data.items():
+                        if isinstance(val, list):
+                            print(f"    Key '{key}': List (len={len(val)})")
+                            if len(val) > 0:
+                                elem = val[0]
+                                print(f"      Element[0] type: {type(elem)}")
+                                if isinstance(elem, dict):
+                                     print(f"      Element[0] keys: {list(elem.keys())}")
+                                     for sub_k, sub_v in elem.items():
+                                         if hasattr(sub_v, 'shape'):
+                                             print(f"        SubKey '{sub_k}': {type(sub_v)} shape={sub_v.shape}")
+                                         else:
+                                             print(f"        SubKey '{sub_k}': {type(sub_v)}")
+                                elif hasattr(elem, 'shape'): 
+                                    print(f"      Element[0] shape: {elem.shape}")
+                        elif hasattr(val, 'shape'):
+                            print(f"    Key '{key}': Array (shape={val.shape})")
+                        else:
+                            print(f"    Key '{key}': {type(val)}")
+                print("------------------------------\n")
+                # ------------------------------------------
                     
                 # Restore trajectory to env
                 # self.env.set_path_lst sets self.left_joint_path etc.
@@ -557,7 +618,9 @@ class DataProcessor:
                 
                 # Replay variables
                 self.env.need_plan = False # IMPORTANT: Disable planner
-                self.env.render_freq = 0 # Manual render
+
+                # TODO config render freq here
+                # self.env.render_freq = 0 # Manual render
                 
                 # Replay Loop
                 # Instead of standard self.env.play_once(), we iterate step-by-step
@@ -595,6 +658,8 @@ class DataProcessor:
                 # This will trigger our callback at every step (or sparse steps)
                 self.env.play_once()
                 
+                # merge pkl data to h5 and video
+                print(f"Merge pkl to h5 file for episode {epid} and seed {seed}")
                 self.env.close_env()
                 self.env.merge_pkl_to_hdf5_video()
                 assert self.env.check_success(), "Collect Error"
