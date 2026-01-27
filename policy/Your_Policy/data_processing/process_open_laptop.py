@@ -51,6 +51,9 @@ class OpenLaptopDataGen(open_laptop):
             "rotate": 50
         }
 
+        # TODO Set negative sample duration here
+        self.neg_duration = 50
+
     def set_sample_intervals(self, intervals):
         """
         Set sampling intervals for different phases
@@ -101,7 +104,7 @@ class OpenLaptopDataGen(open_laptop):
                      # 2. Rollout Negative Sample (using helper)
                      # Using FRAME_IDX as branch_idx for traceability
                      print(f"Sample Neg Traj at save index {self.FRAME_IDX} at control index {control_idx} for episode {self.ep_num}")
-                     self.sample_neg_from(duration=10, branch_idx=self.FRAME_IDX) 
+                     self.sample_neg_from(duration=self.neg_duration, branch_idx=self.FRAME_IDX) 
                      
                      # 3. Restore State
                      self.set_state(state_backup)
@@ -573,104 +576,46 @@ class DataProcessor:
             # args need to be compatible
             self.env.setup_demo(now_ep_num=epid, seed=seed, **self.args)
             
-            # 2. Load Success Trajectory
-            # This corresponds to 'Phase 2' in collect_data
-            try:
-                traj_data = self.env.load_tran_data(epid)
-            except FileNotFoundError:
-                print(f"Trajectory for ep {epid} not found. Skipping.")
-                continue
-            
-            # Using external tool for analysis (can be called in GDB)
-            analyze_trajectory(traj_data, self.env)
-            # --- Analysis of Trajectory Data ---
-            traj_len = sum(seg['position'].shape[0] for seg in traj_data['left_joint_path'])
-            save_freq = self.env.save_freq if hasattr(self.env, 'save_freq') and self.env.save_freq else 1
-            effective_len = traj_len // save_freq if save_freq > 0 else 0
-            
-            print(f"[Trajectory Info]")
-            print(f"  Total Trajectory Length: {traj_len}")
-            print(f"  Save Frequency: {save_freq}")
-            print(f"  Effective Record Length: {effective_len}")
-            print(f"  Negative Sample Intervals: {getattr(self.env, 'phase_intervals', 'Not Set')}")
-            # -----------------------------------
+            # Check if cache already exists to skip simulation
+            cache_path = f"{self.env.save_dir}/.cache/episode{epid}/"
+            is_cached = os.path.exists(os.path.join(cache_path, "pos_0.pkl"))
 
-            # --- Debug: Analyze traj_data structure ---
-            print("\n[DEBUG] traj_data structure:")
-            print(f"  Type: {type(traj_data)}")
-            if isinstance(traj_data, dict):
-                print(f"  Keys: {list(traj_data.keys())}")
-                for key, val in traj_data.items():
-                    if isinstance(val, list):
-                        print(f"    Key '{key}': List (len={len(val)})")
-                        for idx, elem in enumerate(val):
-                            print(f"      Element[{idx}] type: {type(elem)}")
-                            if isinstance(elem, dict):
-                                    print(f"      Element[{idx}] keys: {list(elem.keys())}")
-                                    for sub_k, sub_v in elem.items():
-                                        if hasattr(sub_v, 'shape'):
-                                            print(f"        SubKey '{sub_k}': {type(sub_v)} shape={sub_v.shape}")
-                                        else:
-                                            print(f"        SubKey '{sub_k}': {type(sub_v)}")
-                            elif hasattr(elem, 'shape'): 
-                                print(f"      Element[{idx}] shape: {elem.shape}")
-                    elif hasattr(val, 'shape'):
-                        print(f"    Key '{key}': Array (shape={val.shape})")
-                    else:
-                        print(f"    Key '{key}': {type(val)}")
-            print("------------------------------\n")
-            # ------------------------------------------
+            if is_cached:
+                print(f"Skipping simulation for Episode {epid} (Found existing cache at {cache_path})")
+                self.env.folder_path = {"cache": cache_path}
+            else:
+                # 2. Load Success Trajectory
+                # This corresponds to 'Phase 2' in collect_data
+                try:
+                    traj_data = self.env.load_tran_data(epid)
+                except FileNotFoundError:
+                    print(f"Trajectory for ep {epid} not found. Skipping.")
+                    continue
                 
-            # Restore trajectory to env
-            # self.env.set_path_lst sets self.left_joint_path etc.
-            # args need to hold the paths temporarily if using original API
-            # But we can manually set it:
-            self.env.left_joint_path = traj_data['left_joint_path']
-            self.env.right_joint_path = traj_data['right_joint_path']
-            self.env.left_cnt = 0
-            self.env.right_cnt = 0
-            
-            # Replay variables
-            self.env.need_plan = False # IMPORTANT: Disable planner
+                # Using external tool for analysis (can be called in GDB)
+                analyze_trajectory(traj_data, self.env, verbose=True)
+                
+                # Restore trajectory to env
+                self.env.left_joint_path = traj_data['left_joint_path']
+                self.env.right_joint_path = traj_data['right_joint_path']
+                self.env.left_cnt = 0
+                self.env.right_cnt = 0
+                
+                # Replay variables
+                self.env.need_plan = False # IMPORTANT: Disable planner
 
-            # TODO config render freq here
-            # self.env.render_freq = 0 # Manual render
+                # TODO config render freq here
+                # self.env.render_freq = 0 # Manual render
+                
+                # We can use a callback in the env
+                self.env.on_step_callback = self.step_handler
+                self.env.callback_data = {
+                    # "writer": episode_group, # Not used
+                }
             
-            # Replay Loop
-            # Instead of standard self.env.play_once(), we iterate step-by-step
-            
-            # The task structure in open_laptop.play_once is:
-            # 1. grasp_actor (move to pre_grasp, move to grasp, close)
-            # 2. move (open lid)
-            
-            # To hook into specific steps, we can overload 'take_dense_action' or break down play_once.
-            # Or, simpler: Just execute play_once() but modify 'take_dense_action' to do sampling.
-            # However, modifying 'take_dense_action' inside the loop is tricky.
-            
-            # Better approach:
-            # We write a custom replay loop here that mimics 'play_once' logic 
-            # OR we instrument 'move' / 'take_dense_action' via the class override.
-            
-            # Let's override 'take_dense_action' in OpenLaptopDataGen? 
-            # Or adds a callback mechanism.
-            
-            # Sample Collection Storage
-            # episode_group = out_f.create_group(f"episode_{epid}")
-            
-            # episode_group = out_f.create_group(f"episode_{epid}")
-            
-            # We need to collect:
-            # Images, JointPos
-            
-            # We can use a callback in the env
-            self.env.on_step_callback = self.step_handler
-            self.env.callback_data = {
-                # "writer": episode_group, # Not used
-            }
-            
-            # Run Replay
-            # This will trigger our callback at every step (or sparse steps)
-            self.env.play_once()
+                # Run Replay
+                # This will trigger our callback at every step (or sparse steps)
+                self.env.play_once()
             
             # merge pkl data to h5 and video
             print(f"Merge pkl to h5 file for episode {epid} and seed {seed}")
@@ -695,8 +640,6 @@ class DataProcessor:
 
     def load_hdf5(self, file_path):
         return h5py.File(file_path, 'r')
-
-
 
 if __name__ == "__main__":
     # Example Usage

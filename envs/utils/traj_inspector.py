@@ -48,10 +48,8 @@ def analyze_trajectory(traj_data, env=None, verbose=False):
                 if isinstance(first_elem, (list, np.ndarray)) or (hasattr(first_elem, '__len__') and not isinstance(first_elem, (str, dict))):
                     # Likely segmented
                     is_segmented = True
-                    total_len = sum(len(seg) for seg in data_seq)
-                else:
-                    total_len = len(data_seq)
             
+            total_len = sum(seg['position'].shape[0] for seg in traj_data[path_key])
             print(f"Target Key: '{path_key}'")
             print(f"Structure: {'Segmented List' if is_segmented else 'Flat List'}")
             print(f"Total Steps (Sum): {total_len}")
