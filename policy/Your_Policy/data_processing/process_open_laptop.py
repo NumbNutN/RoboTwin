@@ -79,7 +79,8 @@ class OpenLaptopDataGen(open_laptop):
              # --- INJECTED NEGATIVE SAMPLING LOGIC START (Phase 2 Only) ---
              # We only sample negatives if we are NOT planning (need_plan=False) 
              # and we are currently tracking a positive trajectory.
-             if not self.need_plan and self.sample_type == 'positive':
+             # Also ensure we are in a data-saving mode (save_freq is not None)
+             if save_freq is not None and not self.need_plan and self.sample_type == 'positive':
                  # We simply use the current global frame index or specific counter
                  # Using internal counter to be consistent
                  if self.pos_step_counter % self.sample_interval == 0:
@@ -293,21 +294,23 @@ class OpenLaptopDataGen(open_laptop):
         
         # Action Loop for Rollout
         for _ in range(duration):
-            # 1. Random perturbation (Exploration Noise)
-            noise_l = np.random.normal(0, 0.05, 7) # 7 joints for ALOHA
-            noise_r = np.random.normal(0, 0.05, 7)
-            
             # 2. Get current targets/states
-            # We use jointState to get 7-dof position (excluding gripper)
+            # We use jointState to get n-dof position (excluding gripper)
             curr_qpos_l = self.robot.get_left_arm_jointState()[:-1] 
             curr_qpos_r = self.robot.get_right_arm_jointState()[:-1]
+
+            # 1. Random perturbation (Exploration Noise) - Auto-detect DOF
+            dof_l = len(curr_qpos_l)
+            dof_r = len(curr_qpos_r)
+            noise_l = np.random.normal(0, 0.05, dof_l) 
+            noise_r = np.random.normal(0, 0.05, dof_r)
             
             # 3. Apply Noisy Action
             target_l = np.array(curr_qpos_l) + noise_l
             target_r = np.array(curr_qpos_r) + noise_r
             
-            self.robot.set_arm_joints(target_l, np.zeros(7), 'left')
-            self.robot.set_arm_joints(target_r, np.zeros(7), 'right')
+            self.robot.set_arm_joints(target_l, np.zeros(dof_l), 'left')
+            self.robot.set_arm_joints(target_r, np.zeros(dof_r), 'right')
             
             self.scene.step()
             
@@ -462,6 +465,7 @@ class DataProcessor:
             self.args = yaml.load(f.read(), Loader=yaml.FullLoader)
 
         self.args['task_name'] = self.task_name
+        self.args['task_config'] = self.task_config
 
         # Setup embodiment
         embodiment_type = self.args.get("embodiment", ["aloha"]) # Default to aloha if not present
@@ -492,6 +496,9 @@ class DataProcessor:
         self.args['render_freq'] = 0
         self.args['save_data'] = True
 
+        # set new save dir here
+        self.args["save_path"] = os.path.join(self.args["save_path"], str(self.args["task_name"]), self.args["task_config"])
+
         return
 
     def run_two_stage_collection(self):
@@ -509,12 +516,13 @@ class DataProcessor:
         
         seed_list_path = os.path.join(self.args["save_path"], "seed.txt")
         if not os.path.exists(seed_list_path):
-            print("No seeds found. Please run collect_data.py first to generate success seeds.")
+            print(f"No seeds found in {seed_list_path}. Please run collect_data.py first to generate success seeds.")
             return
 
         with open(seed_list_path, "r") as file:
             seed_list = [int(i) for i in file.read().split()]
-            
+        
+        # TODO Debug Here
         print(f"Found {len(seed_list)} seeds.")
         
         # Output HDF5 file
@@ -775,6 +783,7 @@ class DataProcessor:
 if __name__ == "__main__":
     # Example Usage
     processor = DataProcessor("open_laptop", "data/open_laptop/data", "data/processed")
+    processor.run_two_stage_collection()
     # processor.run()
     print("Data Processor initialized. Ready to run on HDF5 files.")
 
