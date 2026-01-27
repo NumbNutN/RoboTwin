@@ -65,6 +65,9 @@ def create_hdf5_from_dict(hdf5_group, data_dict):
                 encode_data, max_len = images_encoding(value)
                 hdf5_group.create_dataset(key, data=encode_data, dtype=f"S{max_len}")
             else:
+                # Handle dictionary array created by pkl2hdf5
+                if value.dtype.kind == 'U' or value.dtype.kind == 'S':
+                     value = np.char.encode(value, 'utf-8')
                 hdf5_group.create_dataset(key, data=value)
         else:
             return

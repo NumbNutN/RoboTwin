@@ -182,6 +182,13 @@ class OpenLaptopDataGen(open_laptop):
              self.sample_interval = self.phase_intervals.get("rotate", 5) # Very high frequency for rotation interactions
         
         for _ in range(15):
+             # Safety Check for Replay Mode: Prevent moving beyond recorded trajectory
+            if not self.need_plan:
+                 if str(arm_tag) == 'left' and hasattr(self, 'left_joint_path') and self.left_cnt >= len(self.left_joint_path):
+                     break
+                 if str(arm_tag) == 'right' and hasattr(self, 'right_joint_path') and self.right_cnt >= len(self.right_joint_path):
+                     break
+
             # Get target rotation pose
             self.move(
                 self.grasp_actor(
@@ -588,18 +595,17 @@ class DataProcessor:
                     for key, val in traj_data.items():
                         if isinstance(val, list):
                             print(f"    Key '{key}': List (len={len(val)})")
-                            if len(val) > 0:
-                                elem = val[0]
-                                print(f"      Element[0] type: {type(elem)}")
+                            for idx, elem in enumerate(val):
+                                print(f"      Element[{idx}] type: {type(elem)}")
                                 if isinstance(elem, dict):
-                                     print(f"      Element[0] keys: {list(elem.keys())}")
+                                     print(f"      Element[{idx}] keys: {list(elem.keys())}")
                                      for sub_k, sub_v in elem.items():
                                          if hasattr(sub_v, 'shape'):
                                              print(f"        SubKey '{sub_k}': {type(sub_v)} shape={sub_v.shape}")
                                          else:
                                              print(f"        SubKey '{sub_k}': {type(sub_v)}")
                                 elif hasattr(elem, 'shape'): 
-                                    print(f"      Element[0] shape: {elem.shape}")
+                                    print(f"      Element[{idx}] shape: {elem.shape}")
                         elif hasattr(val, 'shape'):
                             print(f"    Key '{key}': Array (shape={val.shape})")
                         else:
