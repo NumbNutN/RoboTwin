@@ -451,6 +451,16 @@ class OpenLaptopDataGen(open_laptop):
                          if len(qpos_val) > 0:
                              branch_subgrp.attrs['start_qpos'] = qpos_val
 
+                    # Generate Video for Negative Branch
+                    try:
+                        if "observation" in branch_data and "head_camera" in branch_data["observation"]:
+                            neg_rgb_seq = np.array(branch_data["observation"]["head_camera"]["rgb"])
+                            neg_video_path = f"{self.save_dir}/video/episode{self.ep_num}_neg_branch{b_idx}.mp4"
+                            images_to_video(neg_rgb_seq, out_path=neg_video_path)
+                            # print(f"Negative video saved to {neg_video_path}")
+                    except Exception as e:
+                        print(f"Error creating negative video branch {b_idx}: {e}")
+
         # 4. Generate Video (Positive Trajectory Only)
         try:
             if "observation" in full_data and "head_camera" in full_data["observation"]:
@@ -548,127 +558,125 @@ class DataProcessor:
         with open(seed_list_path, "r") as file:
             seed_list = [int(i) for i in file.read().split()]
         
+        # Verify seeds
         # TODO Debug Here
         print(f"Found {len(seed_list)} seeds.")
         
-        # Output HDF5 file
-        out_h5_path = os.path.join(self.output_dir, "dataset.hdf5")
+        # NOTE: H5 accumulation removed as it was redundant with merge_pkl_to_hdf5_video
         
-        with h5py.File(out_h5_path, "w") as out_f:
-        
-            for epid, seed in enumerate(seed_list):
-                # TODO Start process a traj
-                print(f"Processing Episode {epid} (Seed {seed})")
-                
-                # 1. Setup Env for Replay
-                # We need to force use_seed=True logic
-                # args need to be compatible
-                self.env.setup_demo(now_ep_num=epid, seed=seed, **self.args)
-                
-                # 2. Load Success Trajectory
-                # This corresponds to 'Phase 2' in collect_data
-                try:
-                    traj_data = self.env.load_tran_data(epid)
-                except FileNotFoundError:
-                    print(f"Trajectory for ep {epid} not found. Skipping.")
-                    continue
-                
-                # Using external tool for analysis (can be called in GDB)
-                analyze_trajectory(traj_data, self.env)
-                # --- Analysis of Trajectory Data ---
-                traj_len = sum(seg['position'].shape[0] for seg in traj_data['left_joint_path'])
-                save_freq = self.env.save_freq if hasattr(self.env, 'save_freq') and self.env.save_freq else 1
-                effective_len = traj_len // save_freq if save_freq > 0 else 0
-                
-                print(f"[Trajectory Info]")
-                print(f"  Total Trajectory Length: {traj_len}")
-                print(f"  Save Frequency: {save_freq}")
-                print(f"  Effective Record Length: {effective_len}")
-                print(f"  Negative Sample Intervals: {getattr(self.env, 'phase_intervals', 'Not Set')}")
-                # -----------------------------------
+        for epid, seed in enumerate(seed_list):
+            # TODO Start process a traj
+            print(f"Processing Episode {epid} (Seed {seed})")
+            
+            # 1. Setup Env for Replay
+            # We need to force use_seed=True logic
+            # args need to be compatible
+            self.env.setup_demo(now_ep_num=epid, seed=seed, **self.args)
+            
+            # 2. Load Success Trajectory
+            # This corresponds to 'Phase 2' in collect_data
+            try:
+                traj_data = self.env.load_tran_data(epid)
+            except FileNotFoundError:
+                print(f"Trajectory for ep {epid} not found. Skipping.")
+                continue
+            
+            # Using external tool for analysis (can be called in GDB)
+            analyze_trajectory(traj_data, self.env)
+            # --- Analysis of Trajectory Data ---
+            traj_len = sum(seg['position'].shape[0] for seg in traj_data['left_joint_path'])
+            save_freq = self.env.save_freq if hasattr(self.env, 'save_freq') and self.env.save_freq else 1
+            effective_len = traj_len // save_freq if save_freq > 0 else 0
+            
+            print(f"[Trajectory Info]")
+            print(f"  Total Trajectory Length: {traj_len}")
+            print(f"  Save Frequency: {save_freq}")
+            print(f"  Effective Record Length: {effective_len}")
+            print(f"  Negative Sample Intervals: {getattr(self.env, 'phase_intervals', 'Not Set')}")
+            # -----------------------------------
 
-                # --- Debug: Analyze traj_data structure ---
-                print("\n[DEBUG] traj_data structure:")
-                print(f"  Type: {type(traj_data)}")
-                if isinstance(traj_data, dict):
-                    print(f"  Keys: {list(traj_data.keys())}")
-                    for key, val in traj_data.items():
-                        if isinstance(val, list):
-                            print(f"    Key '{key}': List (len={len(val)})")
-                            for idx, elem in enumerate(val):
-                                print(f"      Element[{idx}] type: {type(elem)}")
-                                if isinstance(elem, dict):
-                                     print(f"      Element[{idx}] keys: {list(elem.keys())}")
-                                     for sub_k, sub_v in elem.items():
-                                         if hasattr(sub_v, 'shape'):
-                                             print(f"        SubKey '{sub_k}': {type(sub_v)} shape={sub_v.shape}")
-                                         else:
-                                             print(f"        SubKey '{sub_k}': {type(sub_v)}")
-                                elif hasattr(elem, 'shape'): 
-                                    print(f"      Element[{idx}] shape: {elem.shape}")
-                        elif hasattr(val, 'shape'):
-                            print(f"    Key '{key}': Array (shape={val.shape})")
-                        else:
-                            print(f"    Key '{key}': {type(val)}")
-                print("------------------------------\n")
-                # ------------------------------------------
-                    
-                # Restore trajectory to env
-                # self.env.set_path_lst sets self.left_joint_path etc.
-                # args need to hold the paths temporarily if using original API
-                # But we can manually set it:
-                self.env.left_joint_path = traj_data['left_joint_path']
-                self.env.right_joint_path = traj_data['right_joint_path']
-                self.env.left_cnt = 0
-                self.env.right_cnt = 0
+            # --- Debug: Analyze traj_data structure ---
+            print("\n[DEBUG] traj_data structure:")
+            print(f"  Type: {type(traj_data)}")
+            if isinstance(traj_data, dict):
+                print(f"  Keys: {list(traj_data.keys())}")
+                for key, val in traj_data.items():
+                    if isinstance(val, list):
+                        print(f"    Key '{key}': List (len={len(val)})")
+                        for idx, elem in enumerate(val):
+                            print(f"      Element[{idx}] type: {type(elem)}")
+                            if isinstance(elem, dict):
+                                    print(f"      Element[{idx}] keys: {list(elem.keys())}")
+                                    for sub_k, sub_v in elem.items():
+                                        if hasattr(sub_v, 'shape'):
+                                            print(f"        SubKey '{sub_k}': {type(sub_v)} shape={sub_v.shape}")
+                                        else:
+                                            print(f"        SubKey '{sub_k}': {type(sub_v)}")
+                            elif hasattr(elem, 'shape'): 
+                                print(f"      Element[{idx}] shape: {elem.shape}")
+                    elif hasattr(val, 'shape'):
+                        print(f"    Key '{key}': Array (shape={val.shape})")
+                    else:
+                        print(f"    Key '{key}': {type(val)}")
+            print("------------------------------\n")
+            # ------------------------------------------
                 
-                # Replay variables
-                self.env.need_plan = False # IMPORTANT: Disable planner
+            # Restore trajectory to env
+            # self.env.set_path_lst sets self.left_joint_path etc.
+            # args need to hold the paths temporarily if using original API
+            # But we can manually set it:
+            self.env.left_joint_path = traj_data['left_joint_path']
+            self.env.right_joint_path = traj_data['right_joint_path']
+            self.env.left_cnt = 0
+            self.env.right_cnt = 0
+            
+            # Replay variables
+            self.env.need_plan = False # IMPORTANT: Disable planner
 
-                # TODO config render freq here
-                # self.env.render_freq = 0 # Manual render
-                
-                # Replay Loop
-                # Instead of standard self.env.play_once(), we iterate step-by-step
-                
-                # The task structure in open_laptop.play_once is:
-                # 1. grasp_actor (move to pre_grasp, move to grasp, close)
-                # 2. move (open lid)
-                
-                # To hook into specific steps, we can overload 'take_dense_action' or break down play_once.
-                # Or, simpler: Just execute play_once() but modify 'take_dense_action' to do sampling.
-                # However, modifying 'take_dense_action' inside the loop is tricky.
-                
-                # Better approach:
-                # We write a custom replay loop here that mimics 'play_once' logic 
-                # OR we instrument 'move' / 'take_dense_action' via the class override.
-                
-                # Let's override 'take_dense_action' in OpenLaptopDataGen? 
-                # Or adds a callback mechanism.
-                
-                # Sample Collection Storage
-                episode_group = out_f.create_group(f"episode_{epid}")
-                
-                # We need to collect:
-                # Images, JointPos
-                
-                # We can use a callback in the env
-                self.env.on_step_callback = self.step_handler
-                self.env.callback_data = {
-                    "writer": episode_group,
-                    "frame_idx": 0,
-                    "negatives": []
-                }
-                
-                # Run Replay
-                # This will trigger our callback at every step (or sparse steps)
-                self.env.play_once()
-                
-                # merge pkl data to h5 and video
-                print(f"Merge pkl to h5 file for episode {epid} and seed {seed}")
-                self.env.close_env()
-                self.env.merge_pkl_to_hdf5_video()
-                assert self.env.check_success(), "Collect Error"
+            # TODO config render freq here
+            # self.env.render_freq = 0 # Manual render
+            
+            # Replay Loop
+            # Instead of standard self.env.play_once(), we iterate step-by-step
+            
+            # The task structure in open_laptop.play_once is:
+            # 1. grasp_actor (move to pre_grasp, move to grasp, close)
+            # 2. move (open lid)
+            
+            # To hook into specific steps, we can overload 'take_dense_action' or break down play_once.
+            # Or, simpler: Just execute play_once() but modify 'take_dense_action' to do sampling.
+            # However, modifying 'take_dense_action' inside the loop is tricky.
+            
+            # Better approach:
+            # We write a custom replay loop here that mimics 'play_once' logic 
+            # OR we instrument 'move' / 'take_dense_action' via the class override.
+            
+            # Let's override 'take_dense_action' in OpenLaptopDataGen? 
+            # Or adds a callback mechanism.
+            
+            # Sample Collection Storage
+            # episode_group = out_f.create_group(f"episode_{epid}")
+            
+            # episode_group = out_f.create_group(f"episode_{epid}")
+            
+            # We need to collect:
+            # Images, JointPos
+            
+            # We can use a callback in the env
+            self.env.on_step_callback = self.step_handler
+            self.env.callback_data = {
+                # "writer": episode_group, # Not used
+            }
+            
+            # Run Replay
+            # This will trigger our callback at every step (or sparse steps)
+            self.env.play_once()
+            
+            # merge pkl data to h5 and video
+            print(f"Merge pkl to h5 file for episode {epid} and seed {seed}")
+            self.env.close_env()
+            self.env.merge_pkl_to_hdf5_video()
+            assert self.env.check_success(), "Collect Error"
 
     def step_handler(self, env_instance):
         """
@@ -688,173 +696,11 @@ class DataProcessor:
     def load_hdf5(self, file_path):
         return h5py.File(file_path, 'r')
 
-    def segment_trajectory(self, qpos_seq, gripper_seq):
-        """
-        Segment trajectory based on gripper state
-        Phase 1: Approach (Gripper Open -> Start Closing)
-        Phase 2: Grasp (Closing -> Fully Closed)
-        Phase 3: Manipulation (Closed -> End)
-        """
-        # Heuristic: Gripper width
-        # Open ~ 1.0 (or > 0.8), Closed < 0.1
-        
-        # Find index where gripper first drops below 0.8 (Start Closing)
-        close_start_idx = -1
-        for i in range(len(gripper_seq)):
-            if gripper_seq[i] < 0.9: # Threshold
-                close_start_idx = i
-                break
-        
-        if close_start_idx == -1:
-            return [(0, len(qpos_seq), "approach")] # Never closed
-            
-        # Find index where gripper is fully closed/stable
-        close_end_idx = -1
-        for i in range(close_start_idx, len(gripper_seq)):
-            if gripper_seq[i] < 0.1: # Fully closed
-                close_end_idx = i
-                break
-        
-        segments = []
-        if close_start_idx > 0:
-            segments.append((0, close_start_idx, "approach"))
-        
-        if close_end_idx > close_start_idx:
-            segments.append((close_start_idx, close_end_idx, "grasp"))
-            
-        if close_end_idx != -1 and close_end_idx < len(qpos_seq):
-            segments.append((close_end_idx, len(qpos_seq), "open_laptop"))
-            
-        return segments
 
-    def generate_negative_sample(self, seed, current_step, current_qpos, phase):
-        """
-        Reset sim, replay to state, generate bad trajectory
-        """
-        # 1. Reset Env
-        # Note: We need to pass the correct config args here. 
-        # Assuming self.env is already configured or we re-configure it.
-        # self.env.setup_demo(seed=seed, ...) 
-        
-        # Since implementation depends heavily on the specific robot/scene config loading 
-        # and we don't have the full dataset to replay, we will write the logic 
-        # as a function that would be called if the sim loop was active.
-        
-        # LOGIC:
-        # env.setup_demo(seed=seed)
-        # Replay actions 0...current_step-1
-        # At current_step:
-        #   Get Ground Truth Action (delta theta)
-        #   Generate Negative Action:
-        #      - Opposite direction
-        #      - Random large noise
-        #      - If phase == 'approach', move away from laptop center?
-        #   Rollout Negative Action for N steps
-        #   Return Negative Trajectory
-        
-        # Mock return for now
-        simulated_neg_traj = current_qpos + np.random.randn(*current_qpos.shape) * 0.5 
-        return simulated_neg_traj
-
-    def process_episode(self, hdf5_path, episode_idx, seed):
-         with self.load_hdf5(hdf5_path) as f:
-            # Extract Data
-            # Note: Structure depends on pkl2hdf5 output. 
-            # Assuming standard: observation/qpos/vector or similar
-            
-            # For this example, let's assume we have:
-            # f['observation']['head_camera']['rgb'] (N, H, W, 3)
-            # f['joint_action']['vector'] (N, 14) -> [left_arm, left_grip, right_arm, right_grip]
-            
-            # Check keys
-            if 'joint_action' not in f:
-                return []
-            
-            joint_actions = f['joint_action']['vector'][:] # shape (T, 14)
-            
-            # Separate arm (assuming 7dof + 1 gripper)
-            # Layout: Left(7), LG(1), Right(7), RG(1) -> Total 16? 
-            # Or from robot.py: "vector" = left_jointstate + right_jointstate
-            # left_jointstate = 7 joints + 1 gripper
-            # So indices: 0-6 (Left Arm), 7 (Left Grip), 8-14 (Right Arm), 15 (Right Grip)
-            
-            left_qpos = joint_actions[:, 0:7]
-            left_gripper = joint_actions[:, 7]
-            
-            # Segment
-            segments = self.segment_trajectory(left_qpos, left_gripper)
-            
-            processed_samples = []
-            
-            for start, end, phase in segments:
-                # We want to sample anchor points within this phase
-                # For each anchor point t:
-                #   Anchor: Image_t
-                #   Positive: Future trajectory (deltas) p_t
-                #   Negative: Generated bad trajectory bar_p_t
-                
-                # Sample a few frames from this segment
-                sample_indices = range(start, end, 10) # Stride 10
-                
-                for t in sample_indices:
-                    if t + 10 >= len(joint_actions): # Need future horizon
-                        continue
-                        
-                    # 1. Image (Anchor)
-                    # img = f['observation']['head_camera']['rgb'][t] # Don't load all to RAM yet, store path/idx
-                    
-                    # 2. Positive Trajectory (delta theta)
-                    # p_t = {theta_t, delta_theta_t+1 ... t+n}
-                    horizon = 10
-                    future_qpos = left_qpos[t : t+horizon]
-                    theta_t = left_qpos[t]
-                    
-                    # Deltas
-                    deltas = future_qpos - theta_t # Relative to start
-                    # Or relative steps: d_i = q_i - q_{i-1}
-                    # User request: delta_theta_{t+1} - delta_theta_s_{t+n} 
-                    # "delta_theta_{t+1}" usually means q_{t+1} - q_t.
-                    # Let's use sequence of relative changes.
-                    
-                    pos_traj = deltas # Shape (Horizon, 7)
-                    
-                    # 3. Negative Sampling
-                    # neg_traj = self.generate_negative_sample(seed, t, future_qpos, phase)
-                    # For demo, generating random perturbation as negative
-                    # In real sim, use logic described above
-                    neg_traj = pos_traj + np.random.normal(0, 0.1, pos_traj.shape)
-                    
-                    # Store metadata
-                    sample = {
-                        "episode_path": hdf5_path,
-                        "frame_idx": t,
-                        "phase": phase,
-                        "pos_traj": pos_traj,
-                        "neg_traj": neg_traj,
-                        # "theta_t": theta_t
-                    }
-                    processed_samples.append(sample)
-            
-            return processed_samples
-
-    def run(self):
-        all_samples = []
-        # Walk through user data dir
-        # Mock loop
-        # for file in os.listdir(self.root_dir):
-        #    if file.endswith('.hdf5'):
-        #        samples = self.process_episode(os.path.join(self.root_dir, file), 0, 12345)
-        #        all_samples.extend(samples)
-        
-        print(f"Processed {len(all_samples)} samples.")
-        # Save to disk
-        # with open(os.path.join(self.output_dir, 'train_data.pkl'), 'wb') as f:
-        #    pickle.dump(all_samples, f)
 
 if __name__ == "__main__":
     # Example Usage
     processor = DataProcessor("open_laptop", "data/open_laptop/data", "data/processed")
     processor.run_two_stage_collection()
-    # processor.run()
     print("Data Processor initialized. Ready to run on HDF5 files.")
 
