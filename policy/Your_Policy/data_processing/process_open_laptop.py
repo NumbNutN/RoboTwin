@@ -48,11 +48,13 @@ class OpenLaptopDataGen(open_laptop):
         # self.sample_interval = 2 # Steps between negative samples
         self.pos_step_counter = 0
         self.phase_intervals = {
-            "grasp": 100,
-            "rotate": 50
+            "grasp": 200,
+            "rotate": 100
         }
-        # TODO Set negative sample duration here
+        # Set negative sample duration here
         self.neg_duration = 50
+        # Set positive sample duration here
+        self.pos_duration = 50
     def check_collision(self):
         """
         Check if robot is in collision with anything other than target.
@@ -85,6 +87,9 @@ class OpenLaptopDataGen(open_laptop):
         """
         Overridden to inject Negative Sampling logic during execution.
         """
+        if self.sample_type == 'anchor':
+             print(f"Executing take_dense_action {self.FRAME_IDX}")
+
         # Unpack control sequence
         left_arm, left_gripper, right_arm, right_gripper = (
             control_seq["left_arm"],
@@ -128,6 +133,7 @@ class OpenLaptopDataGen(open_laptop):
                      # 2. Rollout Negative Sample (using helper)
                      # Using FRAME_IDX as branch_idx for traceability
                      # print(f"Sample Neg Traj at save index {self.FRAME_IDX} at control index {control_idx} for episode {self.ep_num}")
+                     print(f"Generating Negative Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX} (Control Step {control_idx})")
                      self.sample_neg_from(duration=self.neg_duration, branch_idx=self.FRAME_IDX) 
                      
                      # 3. Restore State
@@ -188,7 +194,8 @@ class OpenLaptopDataGen(open_laptop):
             if self.sample_type == 'anchor' and control_start_state is not None:
                 # We reuse the state at start of take_dense_action
                 state_now = self.get_state() # Backup end state
-                self.sample_pos_from(control_start_state, control_seq, n_samples=1)
+                print(f"Generating Positive Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX}")
+                self.sample_pos_from(control_start_state, control_seq, n_samples=1, duration=self.pos_duration)
                 self.set_state(state_now) # Restore end state to continue replay
             # ---------------------------------------------
 
@@ -372,7 +379,7 @@ class OpenLaptopDataGen(open_laptop):
             
         return np.concatenate([new_qpos_l_full, new_qpos_r_full])
 
-    def sample_pos_from(self, start_state, control_seq, n_samples=3):
+    def sample_pos_from(self, start_state, control_seq, n_samples=3, duration=None):
         """
         Generate Positive Samples by reconstructing trajectory backwards from the fixed END state.
         Handles mapping from full robot state (n-DoF) to controlled arm joints (7-DoF).
@@ -393,6 +400,11 @@ class OpenLaptopDataGen(open_laptop):
              return
         
         seq_len = max(len(l_pos), len(r_pos))
+        if duration is not None:
+             seq_len = min(seq_len, duration)
+             if len(l_pos) > seq_len: l_pos = l_pos[:seq_len]; l_vel = l_vel[:seq_len]
+             if len(r_pos) > seq_len: r_pos = r_pos[:seq_len]; r_vel = r_vel[:seq_len]
+
         self.branch_idx = self.FRAME_IDX 
         
         # 2. Extract Full Start State and Arm Configs using Helper
@@ -419,6 +431,7 @@ class OpenLaptopDataGen(open_laptop):
         
         # 4. Iterate Samples
         for i in range(n_samples):
+            print(f"    Pos Sample {i+1}/{n_samples}: Backwards reconstruction...")
             # Generate Delta Noise
             noise_l = np.random.normal(0, 0.005, deltas_l.shape) if deltas_l.size > 0 else deltas_l
             noise_r = np.random.normal(0, 0.005, deltas_r.shape) if deltas_r.size > 0 else deltas_r
