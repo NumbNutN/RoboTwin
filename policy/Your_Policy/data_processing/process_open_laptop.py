@@ -283,7 +283,11 @@ class OpenLaptopDataGen(open_laptop):
         
         # Inject Phase 2 specific metadata
         pkl_dic['sample_type'] = self.sample_type
-        pkl_dic['start_qpos'] = self.start_qpos if self.start_qpos is not None else []
+        # Only save start_qpos for branch samples to ensure Anchor consistency
+        if self.sample_type == 'anchor':
+             pkl_dic['start_qpos'] = []
+        else:
+             pkl_dic['start_qpos'] = self.start_qpos if self.start_qpos is not None else []
         
         # Determine filename
         filename = ""
@@ -498,6 +502,7 @@ class OpenLaptopDataGen(open_laptop):
         
         # Reset to Anchor mode
         self.sample_type = 'anchor'
+        self.start_qpos = None
 
     def sample_neg_from(self, duration=10, branch_idx=0):
         """
@@ -645,7 +650,49 @@ class OpenLaptopDataGen(open_laptop):
             data = load_pkl_file(pkl_path)
             append_data_to_structure(full_data, data)
 
+        # --- Debug Helper ---
+        def debug_check_consistency(data, prefix=""):
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    debug_check_consistency(v, f"{prefix}/{k}")
+            elif isinstance(data, list):
+                if not data: return
+                # Check shapes of elements in the list
+                shapes = []
+                types = []
+                for item in data:
+                    if hasattr(item, 'shape'):
+                        shapes.append(item.shape)
+                    elif isinstance(item, (list, tuple)):
+                        shapes.append(len(item))
+                    else:
+                        shapes.append("scalar")
+                    types.append(type(item))
+
+                # Simply check if all shapes match first one
+                first_shape = shapes[0]
+                is_consistent = all(s == first_shape for s in shapes)
+                
+                if not is_consistent:
+                    print(f"\n[DEBUG] Inconsistency found at Key: {prefix}")
+                    print(f"  Total items: {len(data)}")
+                    print(f"  First item shape: {first_shape}")
+                    print(f"  Inconsistent indices:")
+                    for i, s in enumerate(shapes):
+                        if s != first_shape:
+                            print(f"    - Index {i}: shape {s} (Type: {types[i]})")
+                    
+                    print("  -> Triggering PDB trace...")
+                    import pdb; pdb.set_trace()
+        # --------------------
+
         # 3. Create HDF5 File
+        target_file_path = os.path.join(cache_path, "merged_data.h5") # Ensure filename
+        print(f"Merging to {target_file_path}...")
+
+        # Debug Anchor
+        debug_check_consistency(full_data, "Anchor")
+
         with h5py.File(target_file_path, "w") as f:
             # Write Anchor Trajectory to Root
             create_hdf5_from_dict(f, full_data)
@@ -667,6 +714,9 @@ class OpenLaptopDataGen(open_laptop):
                         d = load_pkl_file(pkl_path)
                         append_data_to_structure(b_data, d)
                     
+                    # Debug Branch
+                    debug_check_consistency(b_data, f"{group_name}/branch_{b_idx}")
+
                     # Write Subgroup
                     subgrp = grp.create_group(f"branch_{b_idx}")
                     create_hdf5_from_dict(subgrp, b_data)
