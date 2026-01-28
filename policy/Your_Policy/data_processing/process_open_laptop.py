@@ -338,125 +338,130 @@ class OpenLaptopDataGen(open_laptop):
     def sample_pos_from(self, start_state, control_seq, n_samples=3):
         """
         Generate Positive Samples by reconstructing trajectory backwards from the fixed END state.
-        
-        Args:
-            start_state: The simulation state at the beginning of the segment.
-            control_seq: The original successful control sequence (Targets).
-            n_samples: variations.
+        Handles mapping from full robot state (n-DoF) to controlled arm joints (7-DoF).
         """
         if not control_seq or "left_arm" not in control_seq:
             return
 
         # 1. Parse Control Sequence
-        l_pos = control_seq["left_arm"]["position"] if control_seq["left_arm"] is not None else np.zeros((0, 7)) # Or handle gracefully
-        l_vel = control_seq["left_arm"]["velocity"] if control_seq["left_arm"] is not None else np.zeros((0, 7))
-        r_pos = control_seq["right_arm"]["position"] if control_seq["right_arm"] is not None else np.zeros((0, 7))
-        r_vel = control_seq["right_arm"]["velocity"] if control_seq["right_arm"] is not None else np.zeros((0, 7))
-        l_grip = control_seq["left_gripper"]["result"] if control_seq["left_gripper"] is not None else np.zeros((0, 1))
-        r_grip = control_seq["right_gripper"]["result"] if control_seq["right_gripper"] is not None else np.zeros((0, 1))
+        l_pos = control_seq["left_arm"]["position"] if control_seq["left_arm"] is not None else np.zeros((0, 0))
+        l_vel = control_seq["left_arm"]["velocity"] if control_seq["left_arm"] is not None else np.zeros((0, 0))
+        r_pos = control_seq["right_arm"]["position"] if control_seq["right_arm"] is not None else np.zeros((0, 0))
+        r_vel = control_seq["right_arm"]["velocity"] if control_seq["right_arm"] is not None else np.zeros((0, 0))
+        
+        l_grip = control_seq["left_gripper"]["result"] if control_seq["left_gripper"] is not None else None
+        r_grip = control_seq["right_gripper"]["result"] if control_seq["right_gripper"] is not None else None
 
-        if l_pos.shape[0] == 0 and r_pos.shape[0] == 0:
+        if len(l_pos) == 0 and len(r_pos) == 0:
              return
         
-        seq_len = max(l_pos.shape[0], r_pos.shape[0])
-        self.branch_idx = self.FRAME_IDX # Tag samples with current frame index (Anchor end)
+        seq_len = max(len(l_pos), len(r_pos))
+        self.branch_idx = self.FRAME_IDX 
         
-        # We need the full joint sequence including the start to compute deltas
-        # Start state joint format: [Left (n), Right (n)]
-        n_left = l_pos.shape[1]
+        # 2. Extract Full Start State and Split Left/Right
+        full_qpos = start_state["robot_qpos"]
         
-        start_qpos_total = start_state["robot_qpos"]
-        start_l = start_qpos_total[:n_left]
-        start_r = start_qpos_total[n_left:]
+        # We need to determine the split point between left and right in the full qpos vector
+        # get_state() concatenates [left_entity.qpos, right_entity.qpos]
+        n_left_total = len(self.robot.left_entity.get_qpos())
+        start_qpos_l_full = full_qpos[:n_left_total]
+        start_qpos_r_full = full_qpos[n_left_total:]
         
-        # Concatenate: [Start, step1, step2 ... stepN]
-        full_l = np.vstack([start_l, l_pos])
-        full_r = np.vstack([start_r, r_pos])
+        # 3. Identify Arm Indices within the Full State
+        # We map independent arm joints to their index in the full entity state
+        l_arm_idxs = [self.robot.left_active_joints.index(j) for j in self.robot.left_arm_joints]
+        r_arm_idxs = [self.robot.right_active_joints.index(j) for j in self.robot.right_arm_joints]
+        
+        # 4. Extract Start Arm Config (The only part we want to perturb)
+        start_l_arm = start_qpos_l_full[l_arm_idxs] if len(l_arm_idxs) > 0 else np.array([])
+        start_r_arm = start_qpos_r_full[r_arm_idxs] if len(r_arm_idxs) > 0 else np.array([])
+        
+        # Handle cases where one arm has no action (tile start pos to match length)
+        if len(l_pos) == 0 and len(start_l_arm) > 0: 
+            l_pos = np.tile(start_l_arm, (seq_len, 1))
+            l_vel = np.zeros_like(l_pos)
+        if len(r_pos) == 0 and len(start_r_arm) > 0: 
+            r_pos = np.tile(start_r_arm, (seq_len, 1))
+            r_vel = np.zeros_like(r_pos)
+            
+        # 5. Formulate Trajectory for Backwards Reconstruction: [Start, Step1...StepN]
+        # qt shape: (N+1, 7)
+        qt_l = np.vstack([start_l_arm, l_pos]) if len(start_l_arm) > 0 else np.zeros((seq_len+1, 0))
+        qt_r = np.vstack([start_r_arm, r_pos]) if len(start_r_arm) > 0 else np.zeros((seq_len+1, 0))
         
         # Calculate Deltas: D[t] = Q[t] - Q[t-1]
-        deltas_l = full_l[1:] - full_l[:-1] # Shape (N, DoF)
-        deltas_r = full_r[1:] - full_r[:-1]
+        deltas_l = qt_l[1:] - qt_l[:-1]
+        deltas_r = qt_r[1:] - qt_r[:-1]
         
-        # 2. Iterate Samples
+        # 6. Iterate Samples
         for i in range(n_samples):
             # Generate Delta Noise
-            noise_l = np.random.normal(0, 0.005, deltas_l.shape) # Small noise on deltas
-            noise_r = np.random.normal(0, 0.005, deltas_r.shape)
-            
-            noisy_deltas_l = deltas_l + noise_l
-            noisy_deltas_r = deltas_r + noise_r
+            noise_l = np.random.normal(0, 0.005, deltas_l.shape) if deltas_l.size > 0 else deltas_l
+            noise_r = np.random.normal(0, 0.005, deltas_r.shape) if deltas_r.size > 0 else deltas_r
             
             # Reconstruct Trajectory Backwards from Fixed End State
-            # Goal: End state of generated path must match End state of original path
-            # Q'_N = Q_N
-            # Q'_{t-1} = Q'_t - Delta'_t
+            new_qt_l = np.zeros_like(qt_l)
+            new_qt_r = np.zeros_like(qt_r)
             
-            new_full_l = np.zeros_like(full_l)
-            new_full_r = np.zeros_like(full_r)
+            if qt_l.size > 0:
+                new_qt_l[-1] = qt_l[-1] # Fix End
+                for t in range(seq_len - 1, -1, -1):
+                    new_qt_l[t] = new_qt_l[t+1] - (deltas_l[t] + noise_l[t])
             
-            new_full_l[-1] = full_l[-1]
-            new_full_r[-1] = full_r[-1]
+            if qt_r.size > 0:
+                new_qt_r[-1] = qt_r[-1] # Fix End
+                for t in range(seq_len - 1, -1, -1):
+                    new_qt_r[t] = new_qt_r[t+1] - (deltas_r[t] + noise_r[t])
             
-            for t in range(seq_len - 1, -1, -1):
-                new_full_l[t] = new_full_l[t+1] - noisy_deltas_l[t]
-                new_full_r[t] = new_full_r[t+1] - noisy_deltas_r[t]
+            # Extract New Start State (Arm Only)
+            new_start_l_arm = new_qt_l[0] if new_qt_l.size > 0 else np.array([])
+            new_start_r_arm = new_qt_r[0] if new_qt_r.size > 0 else np.array([])
             
-            # Extract new Start and new Targets
-            new_start_l = new_full_l[0]
-            new_start_r = new_full_r[0]
-            target_l_seq = new_full_l[1:]
-            target_r_seq = new_full_r[1:]
+            # 7. Construct Modified Full Robot State for Simulation
+            new_start_qpos_l_full = start_qpos_l_full.copy()
+            new_start_qpos_r_full = start_qpos_r_full.copy()
+            
+            if len(l_arm_idxs) > 0: new_start_qpos_l_full[l_arm_idxs] = new_start_l_arm
+            if len(r_arm_idxs) > 0: new_start_qpos_r_full[r_arm_idxs] = new_start_r_arm
+            
+            new_full_start_qpos = np.concatenate([new_start_qpos_l_full, new_start_qpos_r_full])
             
             # Set Simulation to New Start State
-            # We construct a modified state dict
             modified_state = start_state.copy()
-            modified_state["robot_qpos"] = np.concatenate([new_start_l, new_start_r])
+            modified_state["robot_qpos"] = new_full_start_qpos
             self.set_state(modified_state)
             
             # Update metadata
             self.sample_type = 'positive'
-            self.start_qpos = modified_state["robot_qpos"] # Store the PERTURBED start
+            self.start_qpos = new_full_start_qpos
             self.pos_step_idx = 0
             
-            # 3. Execution Loop
-            collision_free = True
-            
-            # Note: We must update the scene to reflect set_state BEFORE collision check or first step
-            # self.scene.force_update() or similar if needed, but set_state sets qpos which usually updates collision bodies
+            # 8. Execution Loop with Reconstructed Targets
+            target_l_seq = new_qt_l[1:]
+            target_r_seq = new_qt_r[1:]
             
             for t in range(seq_len):
-                # Apply Action
-                self.robot.set_arm_joints(target_l_seq[t], l_vel[t], "left")
-                self.robot.set_arm_joints(target_r_seq[t], r_vel[t], "right")
+                # Apply Arm Actions
+                if len(l_arm_idxs) > 0:
+                    self.robot.set_arm_joints(target_l_seq[t], l_vel[t], "left")
+                if len(r_arm_idxs) > 0:
+                    self.robot.set_arm_joints(target_r_seq[t], r_vel[t], "right")
                 
-                # Gripper (No noise)
-                if t < len(l_grip):
+                # Apply Gripper Actions (Preserve original)
+                if l_grip is not None and t < len(l_grip):
                      self.robot.set_gripper(l_grip[t], "left", control_seq["left_gripper"]["per_step"])
-                if t < len(r_grip):
+                if r_grip is not None and t < len(r_grip):
                      self.robot.set_gripper(r_grip[t], "right", control_seq["right_gripper"]["per_step"])
                      
                 self.scene.step()
                 
                 if self.check_collision():
-                    collision_free = False
-                     # We assume 'positive' samples must be collision free (except for object interaction?)
-                     # If the original trajectory had contact (like grasping), collision check needs to be smart.
-                     # This simple check_collision() might be too aggressive.
-                     # For now, we trust the placeholder or user logic.
                     break
                     
-                # Save Frame
                 self._update_render()
                 self._take_picture()
             
-            # Reset
-            # Note: We don't save if collision occurred? 
-            # Current logic saved progressively. If collision happened, we have a partial trajectory.
-            # Ideally we should buffer and save only if success. 
-            # But the requirement lists "check collision... if no, mark as positive".
-            # Implementation compromise: The file naming makes them distinct. 
-            # If aborted early, the files exist but fewer. Post-processing can filter.
-            pass
+            # Loop continues for next sample...
         
         # Reset to Anchor mode
         self.sample_type = 'anchor'
