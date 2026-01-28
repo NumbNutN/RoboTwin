@@ -335,6 +335,43 @@ class OpenLaptopDataGen(open_laptop):
         
         # Step physics briefly? No, just set state.
         
+    def _extract_arm_qpos(self, full_state_qpos):
+        """
+        Helper: Extract 7-DoF arm joint positions AND mapping indices from full robot state.
+        Returns: start_l_arm, start_r_arm, (n_left_total, l_idxs, r_idxs)
+        """
+        n_left_total = len(self.robot.left_entity.get_qpos())
+        start_qpos_l_full = full_state_qpos[:n_left_total]
+        start_qpos_r_full = full_state_qpos[n_left_total:]
+        
+        # Identify Indices
+        l_idxs = [self.robot.left_active_joints.index(j) for j in self.robot.left_arm_joints]
+        r_idxs = [self.robot.right_active_joints.index(j) for j in self.robot.right_arm_joints]
+        
+        # Extract Values
+        start_l = start_qpos_l_full[l_idxs] if len(l_idxs) > 0 else np.array([])
+        start_r = start_qpos_r_full[r_idxs] if len(r_idxs) > 0 else np.array([])
+        
+        return start_l, start_r, (n_left_total, l_idxs, r_idxs)
+
+    def _inject_arm_qpos(self, new_l_arm, new_r_arm, full_ref_qpos, mapping_info):
+        """
+        Helper: Reconstruct full robot state by injecting new arm configurations.
+        """
+        n_left_total, l_idxs, r_idxs = mapping_info
+        
+        # Copy original full states as baseline (to keep grippers/other joints unchanged)
+        new_qpos_l_full = full_ref_qpos[:n_left_total].copy()
+        new_qpos_r_full = full_ref_qpos[n_left_total:].copy()
+        
+        # Inject new arm positions
+        if len(l_idxs) > 0 and len(new_l_arm) > 0: 
+            new_qpos_l_full[l_idxs] = new_l_arm
+        if len(r_idxs) > 0 and len(new_r_arm) > 0: 
+            new_qpos_r_full[r_idxs] = new_r_arm
+            
+        return np.concatenate([new_qpos_l_full, new_qpos_r_full])
+
     def sample_pos_from(self, start_state, control_seq, n_samples=3):
         """
         Generate Positive Samples by reconstructing trajectory backwards from the fixed END state.
@@ -358,23 +395,10 @@ class OpenLaptopDataGen(open_laptop):
         seq_len = max(len(l_pos), len(r_pos))
         self.branch_idx = self.FRAME_IDX 
         
-        # 2. Extract Full Start State and Split Left/Right
-        full_qpos = start_state["robot_qpos"]
-        
-        # We need to determine the split point between left and right in the full qpos vector
-        # get_state() concatenates [left_entity.qpos, right_entity.qpos]
-        n_left_total = len(self.robot.left_entity.get_qpos())
-        start_qpos_l_full = full_qpos[:n_left_total]
-        start_qpos_r_full = full_qpos[n_left_total:]
-        
-        # 3. Identify Arm Indices within the Full State
-        # We map independent arm joints to their index in the full entity state
-        l_arm_idxs = [self.robot.left_active_joints.index(j) for j in self.robot.left_arm_joints]
-        r_arm_idxs = [self.robot.right_active_joints.index(j) for j in self.robot.right_arm_joints]
-        
-        # 4. Extract Start Arm Config (The only part we want to perturb)
-        start_l_arm = start_qpos_l_full[l_arm_idxs] if len(l_arm_idxs) > 0 else np.array([])
-        start_r_arm = start_qpos_r_full[r_arm_idxs] if len(r_arm_idxs) > 0 else np.array([])
+        # 2. Extract Full Start State and Arm Configs using Helper
+        full_qpos_ref = start_state["robot_qpos"]
+        start_l_arm, start_r_arm, mapping_info = self._extract_arm_qpos(full_qpos_ref)
+        _, l_arm_idxs, r_arm_idxs = mapping_info # Unpack for logic checks
         
         # Handle cases where one arm has no action (tile start pos to match length)
         if len(l_pos) == 0 and len(start_l_arm) > 0: 
@@ -384,8 +408,8 @@ class OpenLaptopDataGen(open_laptop):
             r_pos = np.tile(start_r_arm, (seq_len, 1))
             r_vel = np.zeros_like(r_pos)
             
-        # 5. Formulate Trajectory for Backwards Reconstruction: [Start, Step1...StepN]
-        # qt shape: (N+1, 7)
+        # 3. Formulate Trajectory for Backwards Reconstruction: [Start, Step1...StepN]
+        # qt shape: (N+1, 7) - Prepend Start State to form valid diffable trajectory
         qt_l = np.vstack([start_l_arm, l_pos]) if len(start_l_arm) > 0 else np.zeros((seq_len+1, 0))
         qt_r = np.vstack([start_r_arm, r_pos]) if len(start_r_arm) > 0 else np.zeros((seq_len+1, 0))
         
@@ -393,7 +417,7 @@ class OpenLaptopDataGen(open_laptop):
         deltas_l = qt_l[1:] - qt_l[:-1]
         deltas_r = qt_r[1:] - qt_r[:-1]
         
-        # 6. Iterate Samples
+        # 4. Iterate Samples
         for i in range(n_samples):
             # Generate Delta Noise
             noise_l = np.random.normal(0, 0.005, deltas_l.shape) if deltas_l.size > 0 else deltas_l
@@ -417,14 +441,10 @@ class OpenLaptopDataGen(open_laptop):
             new_start_l_arm = new_qt_l[0] if new_qt_l.size > 0 else np.array([])
             new_start_r_arm = new_qt_r[0] if new_qt_r.size > 0 else np.array([])
             
-            # 7. Construct Modified Full Robot State for Simulation
-            new_start_qpos_l_full = start_qpos_l_full.copy()
-            new_start_qpos_r_full = start_qpos_r_full.copy()
-            
-            if len(l_arm_idxs) > 0: new_start_qpos_l_full[l_arm_idxs] = new_start_l_arm
-            if len(r_arm_idxs) > 0: new_start_qpos_r_full[r_arm_idxs] = new_start_r_arm
-            
-            new_full_start_qpos = np.concatenate([new_start_qpos_l_full, new_start_qpos_r_full])
+            # 5. Construct Modified Full Robot State for Simulation using Helper
+            new_full_start_qpos = self._inject_arm_qpos(
+                new_start_l_arm, new_start_r_arm, full_qpos_ref, mapping_info
+            )
             
             # Set Simulation to New Start State
             modified_state = start_state.copy()
@@ -436,7 +456,7 @@ class OpenLaptopDataGen(open_laptop):
             self.start_qpos = new_full_start_qpos
             self.pos_step_idx = 0
             
-            # 8. Execution Loop with Reconstructed Targets
+            # 6. Execution Loop with Reconstructed Targets
             target_l_seq = new_qt_l[1:]
             target_r_seq = new_qt_r[1:]
             
