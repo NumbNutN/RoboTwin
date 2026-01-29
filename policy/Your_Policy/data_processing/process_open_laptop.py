@@ -45,16 +45,28 @@ class OpenLaptopDataGen(open_laptop):
         self.pos_step_idx = 0
         
         # New: Counters and Configs for Phase 2
-        # self.sample_interval = 2 # Steps between negative samples
         self.pos_step_counter = 0
-        self.phase_intervals = {
-            "grasp": 200,
-            "rotate": 100
+        self.current_phase = "default" # Tracks current high-level phase
+        
+        # Sampling Configuration per Phase
+        # Allows granular control over when/how samples are generated
+        self.sampling_config = {
+            "grasp": {
+                "neg": {"active": True, "interval": 100,  "duration": 100},
+                "pos": {"active": False, "n_samples": 1, "duration": 100} 
+            },
+            "rotate": {
+                "neg": {"active": True, "interval": 50,   "duration": 100},
+                "pos": {"active": True,  "n_samples": 0, "duration": 100}
+            },
+            "default": {
+                "neg": {"active": False, "interval": 999, "duration": 10},
+                "pos": {"active": False, "n_samples": 0, "duration": 10}
+            }
         }
-        # Set negative sample duration here
-        self.neg_duration = 50
-        # Set positive sample duration here
-        self.pos_duration = 50
+        
+        self.neg_duration = 50 # Default fallback
+        self.pos_duration = 50 # Default fallback
     def check_collision(self):
         """
         Check if robot is in collision with anything other than target.
@@ -127,13 +139,20 @@ class OpenLaptopDataGen(open_laptop):
                   self.segment_states.append(self.get_state())
 
              # --- INJECTED NEGATIVE SAMPLING LOGIC START (Phase 2 Only) ---
+             # Retrieve Config for Current Phase
+             phase_cfg = self.sampling_config.get(self.current_phase, self.sampling_config["default"])
+             neg_cfg = phase_cfg["neg"]
+
              # We only sample negatives if we are NOT planning (need_plan=False) 
              # and we are currently tracking a positive trajectory.
              # Also ensure we are in a data-saving mode (save_freq is not None)
-             if save_freq is not None and not self.need_plan and self.sample_type == 'anchor':
-                 # We simply use the current global frame index or specific counter
+             if (save_freq is not None and 
+                 not self.need_plan and 
+                 self.sample_type == 'anchor' and
+                 neg_cfg["active"]):
+                 
                  # Using internal counter to be consistent
-                 if self.pos_step_counter % self.sample_interval == 0:
+                 if self.pos_step_counter % neg_cfg["interval"] == 0:
                      # 1. Save Current Good State
                      state_backup = self.get_state()
                      
@@ -141,7 +160,7 @@ class OpenLaptopDataGen(open_laptop):
                      # Using FRAME_IDX as branch_idx for traceability
                      # print(f"Sample Neg Traj at save index {self.FRAME_IDX} at control index {control_idx} for episode {self.ep_num}")
                      print(f"Generating Negative Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX} (Control Step {control_idx})")
-                     self.sample_neg_from(duration=self.neg_duration, branch_idx=self.FRAME_IDX) 
+                     self.sample_neg_from(duration=neg_cfg["duration"], branch_idx=self.FRAME_IDX) 
                      
                      # 3. Restore State
                      self.set_state(state_backup)
@@ -196,13 +215,21 @@ class OpenLaptopDataGen(open_laptop):
             self._take_picture()
             
             # --- INJECTED POSITIVE SAMPLING LOGIC START ---
-            # At the end of a segment execution (e.g. Approach complete),
-            # we can try to generate alternative positive variations from the start of this segment.
-            if self.sample_type == 'anchor' and hasattr(self, 'segment_states') and len(self.segment_states) > 0:
+            # Retrieve Config for Current Phase
+            phase_cfg = self.sampling_config.get(self.current_phase, self.sampling_config["default"])
+            pos_cfg = phase_cfg["pos"]
+
+            if (self.sample_type == 'anchor' and 
+                pos_cfg["active"] and 
+                hasattr(self, 'segment_states') and 
+                len(self.segment_states) > 0):
+                
                 # We reuse the state at start of take_dense_action
                 state_now = self.get_state() # Backup end state
                 print(f"Generating Positive Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX}")
-                self.sample_pos_from(control_seq, n_samples=1, duration=self.pos_duration)
+                self.sample_pos_from(control_seq, 
+                                     n_samples=pos_cfg["n_samples"], 
+                                     duration=pos_cfg["duration"])
                 self.set_state(state_now) # Restore end state to continue replay
             # ---------------------------------------------
 
@@ -219,8 +246,8 @@ class OpenLaptopDataGen(open_laptop):
 
         # --- Phase 1: Grasp Laptop Details ---
         # If we are in Replay Phase (!need_plan), we set sampling frequency for this segment
-        if not self.need_plan:
-             self.sample_interval = self.phase_intervals.get("grasp", 10) # High frequency for grasp approach
+        self.current_phase = "grasp"
+        # self.sample_interval = self.phase_intervals.get("grasp", 10) # Deprecated by config
         
         # Execute Move: 
         # In Plan Phase, this plans and saves path.
@@ -229,8 +256,8 @@ class OpenLaptopDataGen(open_laptop):
 
         # --- Phase 2: Rotate Lid Details ---
         # If we are in Replay Phase (!need_plan), adjust sampling frequency
-        if not self.need_plan:
-             self.sample_interval = self.phase_intervals.get("rotate", 5) # Very high frequency for rotation interactions
+        self.current_phase = "rotate"
+        # self.sample_interval = self.phase_intervals.get("rotate", 5) # Deprecated by config
         
         for _ in range(15):
              # Safety Check for Replay Mode: Prevent moving beyond recorded trajectory
