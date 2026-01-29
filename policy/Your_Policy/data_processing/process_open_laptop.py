@@ -115,9 +115,16 @@ class OpenLaptopDataGen(open_laptop):
              max_control_len = max(max_control_len, right_gripper["num_step"])
 
         # Capture Start State for Positive Sampling (Look-back window start)
-        control_start_state = self.get_state() if (save_freq is not None and not self.need_plan) else None
+        # control_start_state = self.get_state() if (save_freq is not None and not self.need_plan) else None
+
+        # Reset/Init segment history of states for this dense action sequence
+        self.segment_states = []
 
         for control_idx in range(max_control_len):
+             # Record state at the beginning of each step (before action applied)
+             # This corresponds to state at index 'control_idx'
+             if save_freq is not None and not self.need_plan and self.sample_type == 'anchor':
+                  self.segment_states.append(self.get_state())
 
              # --- INJECTED NEGATIVE SAMPLING LOGIC START (Phase 2 Only) ---
              # We only sample negatives if we are NOT planning (need_plan=False) 
@@ -191,11 +198,11 @@ class OpenLaptopDataGen(open_laptop):
             # --- INJECTED POSITIVE SAMPLING LOGIC START ---
             # At the end of a segment execution (e.g. Approach complete),
             # we can try to generate alternative positive variations from the start of this segment.
-            if self.sample_type == 'anchor' and control_start_state is not None:
+            if self.sample_type == 'anchor' and hasattr(self, 'segment_states') and len(self.segment_states) > 0:
                 # We reuse the state at start of take_dense_action
                 state_now = self.get_state() # Backup end state
                 print(f"Generating Positive Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX}")
-                self.sample_pos_from(control_start_state, control_seq, n_samples=1, duration=self.pos_duration)
+                self.sample_pos_from(control_seq, n_samples=1, duration=self.pos_duration)
                 self.set_state(state_now) # Restore end state to continue replay
             # ---------------------------------------------
 
@@ -383,7 +390,7 @@ class OpenLaptopDataGen(open_laptop):
             
         return np.concatenate([new_qpos_l_full, new_qpos_r_full])
 
-    def sample_pos_from(self, start_state, control_seq, n_samples=3, duration=None):
+    def sample_pos_from(self, control_seq, n_samples=3, duration=None):
         """
         Generate Positive Samples by reconstructing trajectory backwards from the fixed END state.
         Handles mapping from full robot state (n-DoF) to controlled arm joints (7-DoF).
@@ -403,11 +410,32 @@ class OpenLaptopDataGen(open_laptop):
         if len(l_pos) == 0 and len(r_pos) == 0:
              return
         
-        seq_len = max(len(l_pos), len(r_pos))
+        full_seq_len = max(len(l_pos), len(r_pos))
+        seq_len = full_seq_len
+        
+        # Determine actual Start State from history based on duration
         if duration is not None:
              seq_len = min(seq_len, duration)
-             if len(l_pos) > seq_len: l_pos = l_pos[:seq_len]; l_vel = l_vel[:seq_len]
-             if len(r_pos) > seq_len: r_pos = r_pos[:seq_len]; r_vel = r_vel[:seq_len]
+             # If we only want the LAST 'duration' steps, we slice from the end
+             if len(l_pos) > seq_len: l_pos = l_pos[-seq_len:]; l_vel = l_vel[-seq_len:]
+             if len(r_pos) > seq_len: r_pos = r_pos[-seq_len:]; r_vel = r_vel[-seq_len:]
+        
+        # Check history availability
+        if not hasattr(self, 'segment_states') or len(self.segment_states) == 0:
+             print("Warning: No segment history found for positive sampling.")
+             return
+
+        # The 'start state' for this truncated sequence is found in history
+        # History index:
+        # If full_seq_len = 100, duration = 10. We use actions [90..99].
+        # We need state at index 90.
+        # index = full_seq_len - seq_len
+        # Ensure index is valid
+        start_idx = max(0, full_seq_len - seq_len)
+        if start_idx >= len(self.segment_states):
+             start_idx = len(self.segment_states) - 1 # Fallback
+             
+        start_state = self.segment_states[start_idx]
 
         self.branch_idx = self.FRAME_IDX 
         
