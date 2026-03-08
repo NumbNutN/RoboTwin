@@ -159,12 +159,12 @@ class OpenLaptopDataGen(open_laptop):
                  if self.pos_step_counter % neg_cfg["interval"] == 0 and self.pos_step_counter:
                      # 1. Save Current Good State
                      state_backup = self.get_state()
-                     breakpoint()
+                    #  breakpoint()
                      
                      # 2. Rollout Negative Sample (using helper)
                      # Using FRAME_IDX as branch_idx for traceability
                      # print(f"Sample Neg Traj at save index {self.FRAME_IDX} at control index {control_idx} for episode {self.ep_num}")
-                     print(f"Generating Negative Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX} (Control Step {control_idx})")
+                     print(f"Generating Negative Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX} (Setp {control_idx} / {self.pos_step_counter})")
                      self.sample_neg_from(duration=neg_cfg["duration"], branch_idx=self.FRAME_IDX, active_left=(left_arm is not None), active_right=(right_arm is not None)) 
                      
                      # 3. Restore State
@@ -174,7 +174,7 @@ class OpenLaptopDataGen(open_laptop):
 
                      
                      print(f"Restore to anchor mode at Frame {self.FRAME_IDX}")
-                     breakpoint()
+                    #  breakpoint()
                      
                  self.pos_step_counter += 1
              # --- INJECTED NEGATIVE SAMPLING LOGIC END ---
@@ -603,7 +603,7 @@ class OpenLaptopDataGen(open_laptop):
                 curr_qpos_l = self.robot.get_left_arm_jointState()[:-1] 
                 # 1. Random perturbation (Exploration Noise) - Auto-detect DOF
                 dof_l = len(curr_qpos_l)
-                noise_l = np.random.normal(0, 0.5, dof_l) 
+                noise_l = np.random.normal(0, 0.05, dof_l) 
                 
                 # 3. Apply Noisy Action
                 target_l = np.array(curr_qpos_l) + noise_l
@@ -613,7 +613,7 @@ class OpenLaptopDataGen(open_laptop):
                 curr_qpos_r = self.robot.get_right_arm_jointState()[:-1]
                 # 1. Random perturbation (Exploration Noise) - Auto-detect DOF
                 dof_r = len(curr_qpos_r)
-                noise_r = np.random.normal(0, 0.5, dof_r)
+                noise_r = np.random.normal(0, 0.05, dof_r)
                 
                 # 3. Apply Noisy Action
                 target_r = np.array(curr_qpos_r) + noise_r
@@ -624,6 +624,8 @@ class OpenLaptopDataGen(open_laptop):
             # 4. Save Negative Sample Frame
             # Ensure we update the render before taking picture
             self._update_render()
+            if hasattr(self, 'viewer') and self.viewer:
+                self.viewer.render()
             self._take_picture()
         
         # Reset flags (State restoration is caller's responsibility)
@@ -886,7 +888,7 @@ class DataProcessor:
         # Since we are replaying, we need consistent embodiment
         # self.env.setup_demo(...) # This requires args.
         self.args['need_plan'] = False
-        self.args['render_freq'] = 1  # Set to 1 to visualize every step
+        self.args['render_freq'] = 10  # Set to 1 to visualize every step
         self.args['save_data'] = True
         # TODO config save frequency here
         self.args['save_freq'] = 10 # Force save every frame to align FRAME_IDX with control steps
