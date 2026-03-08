@@ -50,14 +50,17 @@ class OpenLaptopDataGen(open_laptop):
         
         # Sampling Configuration per Phase
         # Allows granular control over when/how samples are generated
+
+        # neg: grasp interval 100
+        # neg: rot interval 50
         self.sampling_config = {
             "grasp": {
-                "neg": {"active": True, "interval": 100,  "duration": 100},
-                "pos": {"active": False, "n_samples": 1, "duration": 100} 
+                "neg": {"active": True, "interval": 400,  "duration": 100},
+                "pos": {"active": False, "n_samples": 3, "duration": 100} 
             },
             "rotate": {
-                "neg": {"active": True, "interval": 50,   "duration": 100},
-                "pos": {"active": True,  "n_samples": 0, "duration": 100}
+                "neg": {"active": False, "interval": 500,   "duration": 100},
+                "pos": {"active": False,  "n_samples": 0, "duration": 100}
             },
             "default": {
                 "neg": {"active": False, "interval": 999, "duration": 10},
@@ -100,7 +103,8 @@ class OpenLaptopDataGen(open_laptop):
         Overridden to inject Negative Sampling logic during execution.
         """
         if self.sample_type == 'anchor':
-             print(f"Executing take_dense_action {self.FRAME_IDX}")
+            if control_seq.get('left_arm') is not None and 'position' in control_seq['left_arm']:
+                print(f"Executing take_dense_action at frame index {self.FRAME_IDX} with control sequence length {len(control_seq['left_arm']['position'])} ")
 
         # Unpack control sequence
         left_arm, left_gripper, right_arm, right_gripper = (
@@ -152,18 +156,25 @@ class OpenLaptopDataGen(open_laptop):
                  neg_cfg["active"]):
                  
                  # Using internal counter to be consistent
-                 if self.pos_step_counter % neg_cfg["interval"] == 0:
+                 if self.pos_step_counter % neg_cfg["interval"] == 0 and self.pos_step_counter:
                      # 1. Save Current Good State
                      state_backup = self.get_state()
+                     breakpoint()
                      
                      # 2. Rollout Negative Sample (using helper)
                      # Using FRAME_IDX as branch_idx for traceability
                      # print(f"Sample Neg Traj at save index {self.FRAME_IDX} at control index {control_idx} for episode {self.ep_num}")
                      print(f"Generating Negative Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX} (Control Step {control_idx})")
-                     self.sample_neg_from(duration=neg_cfg["duration"], branch_idx=self.FRAME_IDX) 
+                     self.sample_neg_from(duration=neg_cfg["duration"], branch_idx=self.FRAME_IDX, active_left=(left_arm is not None), active_right=(right_arm is not None)) 
                      
                      # 3. Restore State
                      self.set_state(state_backup)
+
+                     #! Here you need to reset the controller
+
+                     
+                     print(f"Restore to anchor mode at Frame {self.FRAME_IDX}")
+                     breakpoint()
                      
                  self.pos_step_counter += 1
              # --- INJECTED NEGATIVE SAMPLING LOGIC END ---
@@ -224,13 +235,16 @@ class OpenLaptopDataGen(open_laptop):
                 hasattr(self, 'segment_states') and 
                 len(self.segment_states) > 0):
                 
-                # We reuse the state at start of take_dense_action
-                state_now = self.get_state() # Backup end state
-                print(f"Generating Positive Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX}")
-                self.sample_pos_from(control_seq, 
-                                     n_samples=pos_cfg["n_samples"], 
-                                     duration=pos_cfg["duration"])
-                self.set_state(state_now) # Restore end state to continue replay
+                if pos_cfg["n_samples"] > 0:
+                    # We reuse the state at start of take_dense_action
+                    state_now = self.get_state() # Backup end state
+                    print(f"Generating Positive Sample for Episode {self.ep_num} at Frame {self.FRAME_IDX}")
+                    self.sample_pos_from(control_seq, 
+                                        n_samples=pos_cfg["n_samples"], 
+                                        duration=pos_cfg["duration"])
+                    self.set_state(state_now) # Restore end state to continue replay
+                else:
+                    print(f"[Warning] Positive sampling active for phase '{self.current_phase}' but n_samples is {pos_cfg['n_samples']}. Skipping.")
             # ---------------------------------------------
 
         return True
@@ -559,13 +573,15 @@ class OpenLaptopDataGen(open_laptop):
         self.sample_type = 'anchor'
         self.start_qpos = None
 
-    def sample_neg_from(self, duration=10, branch_idx=0):
+    def sample_neg_from(self, duration=10, branch_idx=0, active_left=True, active_right=True):
         """
         Rollout a negative trajectory and save data via _take_picture.
         
         Args:
             duration: Number of steps to rollout.
             branch_idx: The index of the positive frame where this branch started.
+            active_left: Whether to actively perturb the left arm.
+            active_right: Whether to actively perturb the right arm.
         """
         # Set Phase 2 sampling flags
         self.sample_type = 'negative'
@@ -583,21 +599,25 @@ class OpenLaptopDataGen(open_laptop):
         for _ in range(duration):
             # 2. Get current targets/states
             # We use jointState to get n-dof position (excluding gripper)
-            curr_qpos_l = self.robot.get_left_arm_jointState()[:-1] 
-            curr_qpos_r = self.robot.get_right_arm_jointState()[:-1]
+            if active_left:
+                curr_qpos_l = self.robot.get_left_arm_jointState()[:-1] 
+                # 1. Random perturbation (Exploration Noise) - Auto-detect DOF
+                dof_l = len(curr_qpos_l)
+                noise_l = np.random.normal(0, 0.5, dof_l) 
+                
+                # 3. Apply Noisy Action
+                target_l = np.array(curr_qpos_l) + noise_l
+                self.robot.set_arm_joints(target_l, np.zeros(dof_l), 'left')
 
-            # 1. Random perturbation (Exploration Noise) - Auto-detect DOF
-            dof_l = len(curr_qpos_l)
-            dof_r = len(curr_qpos_r)
-            noise_l = np.random.normal(0, 0.05, dof_l) 
-            noise_r = np.random.normal(0, 0.05, dof_r)
-            
-            # 3. Apply Noisy Action
-            target_l = np.array(curr_qpos_l) + noise_l
-            target_r = np.array(curr_qpos_r) + noise_r
-            
-            self.robot.set_arm_joints(target_l, np.zeros(dof_l), 'left')
-            self.robot.set_arm_joints(target_r, np.zeros(dof_r), 'right')
+            if active_right:
+                curr_qpos_r = self.robot.get_right_arm_jointState()[:-1]
+                # 1. Random perturbation (Exploration Noise) - Auto-detect DOF
+                dof_r = len(curr_qpos_r)
+                noise_r = np.random.normal(0, 0.5, dof_r)
+                
+                # 3. Apply Noisy Action
+                target_r = np.array(curr_qpos_r) + noise_r
+                self.robot.set_arm_joints(target_r, np.zeros(dof_r), 'right')
             
             self.scene.step()
             
@@ -866,7 +886,7 @@ class DataProcessor:
         # Since we are replaying, we need consistent embodiment
         # self.env.setup_demo(...) # This requires args.
         self.args['need_plan'] = False
-        self.args['render_freq'] = 0
+        self.args['render_freq'] = 1  # Set to 1 to visualize every step
         self.args['save_data'] = True
         # TODO config save frequency here
         self.args['save_freq'] = 10 # Force save every frame to align FRAME_IDX with control steps
