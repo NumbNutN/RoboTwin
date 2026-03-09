@@ -55,8 +55,8 @@ class OpenLaptopDataGen(open_laptop):
         # neg: rot interval 50
         self.sampling_config = {
             "grasp": {
-                "neg": {"active": True, "interval": 400,  "duration": 100},
-                "pos": {"active": False, "n_samples": 3, "duration": 100} 
+                "neg": {"active": False, "interval": 400,  "duration": 100},
+                "pos": {"active": True, "n_samples": 1, "duration": 100} 
             },
             "rotate": {
                 "neg": {"active": False, "interval": 500,   "duration": 100},
@@ -270,7 +270,7 @@ class OpenLaptopDataGen(open_laptop):
 
         # --- Phase 2: Rotate Lid Details ---
         # If we are in Replay Phase (!need_plan), adjust sampling frequency
-        self.current_phase = "rotate"
+        # self.current_phase = "rotate"
         # self.sample_interval = self.phase_intervals.get("rotate", 5) # Deprecated by config
         
         for _ in range(15):
@@ -290,6 +290,9 @@ class OpenLaptopDataGen(open_laptop):
                     grasp_dis=0.0,
                     contact_point_id=1,
                 ))
+            
+            if _ >= 0:
+                self.current_phase = "rotate"
             
             # Phase 1 Planning Check: If planning failed, stop
             if self.need_plan and not self.plan_success:
@@ -441,8 +444,8 @@ class OpenLaptopDataGen(open_laptop):
 
         # 1. Parse Control Sequence
         l_pos = control_seq["left_arm"]["position"] if control_seq["left_arm"] is not None else np.zeros((0, 0))
-        l_vel = control_seq["left_arm"]["velocity"] if control_seq["left_arm"] is not None else np.zeros((0, 0))
         r_pos = control_seq["right_arm"]["position"] if control_seq["right_arm"] is not None else np.zeros((0, 0))
+        l_vel = control_seq["left_arm"]["velocity"] if control_seq["left_arm"] is not None else np.zeros((0, 0))
         r_vel = control_seq["right_arm"]["velocity"] if control_seq["right_arm"] is not None else np.zeros((0, 0))
         
         l_grip = control_seq["left_gripper"]["result"] if control_seq["left_gripper"] is not None else None
@@ -485,18 +488,17 @@ class OpenLaptopDataGen(open_laptop):
         start_l_arm, start_r_arm, mapping_info = self._extract_arm_qpos(full_qpos_ref)
         _, l_arm_idxs, r_arm_idxs = mapping_info # Unpack for logic checks
         
-        # Handle cases where one arm has no action (tile start pos to match length)
-        if len(l_pos) == 0 and len(start_l_arm) > 0: 
-            l_pos = np.tile(start_l_arm, (seq_len, 1))
-            l_vel = np.zeros_like(l_pos)
-        if len(r_pos) == 0 and len(start_r_arm) > 0: 
-            r_pos = np.tile(start_r_arm, (seq_len, 1))
-            r_vel = np.zeros_like(r_pos)
-            
-        # 3. Formulate Trajectory for Backwards Reconstruction: [Start, Step1...StepN]
-        # qt shape: (N+1, 7) - Prepend Start State to form valid diffable trajectory
-        qt_l = np.vstack([start_l_arm, l_pos]) if len(start_l_arm) > 0 else np.zeros((seq_len+1, 0))
-        qt_r = np.vstack([start_r_arm, r_pos]) if len(start_r_arm) > 0 else np.zeros((seq_len+1, 0))
+        # 3. Formulate Trajectory for Backwards Reconstruction
+        # If arm is active, we build the trajectory matrix. If not, we keep it empty.
+        qt_l, qt_r = np.zeros((seq_len+1, 0)), np.zeros((seq_len+1, 0))
+        
+        if len(l_pos)>0 and len(start_l_arm) > 0:
+            if len(l_pos) == 0: l_pos = np.tile(start_l_arm, (seq_len, 1)) # Handle mismatched length if needed
+            qt_l = np.vstack([start_l_arm, l_pos])
+
+        if len(r_pos)>0 and len(start_r_arm) > 0:
+            if len(r_pos) == 0: r_pos = np.tile(start_r_arm, (seq_len, 1))
+            qt_r = np.vstack([start_r_arm, r_pos])
         
         # Calculate Deltas: D[t] = Q[t] - Q[t-1]
         deltas_l = qt_l[1:] - qt_l[:-1]
@@ -506,8 +508,8 @@ class OpenLaptopDataGen(open_laptop):
         for i in range(n_samples):
             print(f"    Pos Sample {i+1}/{n_samples}: Backwards reconstruction...")
             # Generate Delta Noise
-            noise_l = np.random.normal(0, 0.005, deltas_l.shape) if deltas_l.size > 0 else deltas_l
-            noise_r = np.random.normal(0, 0.005, deltas_r.shape) if deltas_r.size > 0 else deltas_r
+            noise_l = np.random.normal(0, 0.02, deltas_l.shape) if deltas_l.size > 0 else deltas_l
+            noise_r = np.random.normal(0, 0.02, deltas_r.shape) if deltas_r.size > 0 else deltas_r
             
             # Reconstruct Trajectory Backwards from Fixed End State
             new_qt_l = np.zeros_like(qt_l)
@@ -523,6 +525,10 @@ class OpenLaptopDataGen(open_laptop):
                 for t in range(seq_len - 1, -1, -1):
                     new_qt_r[t] = new_qt_r[t+1] - (deltas_r[t] + noise_r[t])
             
+            # Calculate Velocities via forward difference (consistent with new path)
+            new_vel_l = (new_qt_l[1:] - new_qt_l[:-1]) if new_qt_l.size > 0 else np.zeros((0,0))
+            new_vel_r = (new_qt_r[1:] - new_qt_r[:-1]) if new_qt_r.size > 0 else np.zeros((0,0))
+
             # Extract New Start State (Arm Only)
             new_start_l_arm = new_qt_l[0] if new_qt_l.size > 0 else np.array([])
             new_start_r_arm = new_qt_r[0] if new_qt_r.size > 0 else np.array([])
@@ -548,10 +554,10 @@ class OpenLaptopDataGen(open_laptop):
             
             for t in range(seq_len):
                 # Apply Arm Actions
-                if len(l_arm_idxs) > 0:
-                    self.robot.set_arm_joints(target_l_seq[t], l_vel[t], "left")
-                if len(r_arm_idxs) > 0:
-                    self.robot.set_arm_joints(target_r_seq[t], r_vel[t], "right")
+                if len(l_arm_idxs) > 0 and target_l_seq.size > 0:
+                    self.robot.set_arm_joints(target_l_seq[t], new_vel_l[t], "left")
+                if len(r_arm_idxs) > 0 and target_r_seq.size > 0:
+                    self.robot.set_arm_joints(target_r_seq[t], new_vel_r[t], "right")
                 
                 # Apply Gripper Actions (Preserve original)
                 if l_grip is not None and t < len(l_grip):
@@ -565,6 +571,8 @@ class OpenLaptopDataGen(open_laptop):
                     break
                     
                 self._update_render()
+                if hasattr(self, 'viewer') and self.viewer:
+                    self.viewer.render()
                 self._take_picture()
             
             # Loop continues for next sample...
