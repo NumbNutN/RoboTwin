@@ -56,7 +56,8 @@ class OpenLaptopDataGen(open_laptop):
         self.sampling_config = {
             "grasp": {
                 "neg": {"active": False, "interval": 400,  "duration": 100},
-                "pos": {"active": True, "n_samples": 1, "duration": 100} 
+                # Original pos method (deprecated for grasp tasks)
+                "pos": {"active": False, "n_samples": 0, "duration": 100}
             },
             "rotate": {
                 "neg": {"active": False, "interval": 500,   "duration": 100},
@@ -66,6 +67,13 @@ class OpenLaptopDataGen(open_laptop):
                 "neg": {"active": False, "interval": 999, "duration": 10},
                 "pos": {"active": False, "n_samples": 0, "duration": 10}
             }
+        }
+
+        # New: Alternative grasp-based positive sampling config
+        # This generates positive samples by varying the grasp approach direction
+        self.alt_grasp_pos_config = {
+            "active": True,
+            "n_samples": 3,  # Number of alternative grasp approaches to try
         }
         
         self.neg_duration = 50 # Default fallback
@@ -436,8 +444,11 @@ class OpenLaptopDataGen(open_laptop):
 
     def sample_pos_from(self, control_seq, n_samples=3, duration=None):
         """
+        [DEPRECATED] Original method - kept for reference.
         Generate Positive Samples by reconstructing trajectory backwards from the fixed END state.
-        Handles mapping from full robot state (n-DoF) to controlled arm joints (7-DoF).
+
+        NOTE: This method has issues with grasp tasks because it only modifies joint positions
+        without re-planning the grasp trajectory. Use sample_pos_via_alt_grasp instead.
         """
         if not control_seq or "left_arm" not in control_seq:
             return
@@ -447,23 +458,23 @@ class OpenLaptopDataGen(open_laptop):
         r_pos = control_seq["right_arm"]["position"] if control_seq["right_arm"] is not None else np.zeros((0, 0))
         l_vel = control_seq["left_arm"]["velocity"] if control_seq["left_arm"] is not None else np.zeros((0, 0))
         r_vel = control_seq["right_arm"]["velocity"] if control_seq["right_arm"] is not None else np.zeros((0, 0))
-        
+
         l_grip = control_seq["left_gripper"]["result"] if control_seq["left_gripper"] is not None else None
         r_grip = control_seq["right_gripper"]["result"] if control_seq["right_gripper"] is not None else None
 
         if len(l_pos) == 0 and len(r_pos) == 0:
              return
-        
+
         full_seq_len = max(len(l_pos), len(r_pos))
         seq_len = full_seq_len
-        
+
         # Determine actual Start State from history based on duration
         if duration is not None:
              seq_len = min(seq_len, duration)
              # If we only want the LAST 'duration' steps, we slice from the end
              if len(l_pos) > seq_len: l_pos = l_pos[-seq_len:]; l_vel = l_vel[-seq_len:]
              if len(r_pos) > seq_len: r_pos = r_pos[-seq_len:]; r_vel = r_vel[-seq_len:]
-        
+
         # Check history availability
         if not hasattr(self, 'segment_states') or len(self.segment_states) == 0:
              print("Warning: No segment history found for positive sampling.")
@@ -478,20 +489,20 @@ class OpenLaptopDataGen(open_laptop):
         start_idx = max(0, full_seq_len - seq_len)
         if start_idx >= len(self.segment_states):
              start_idx = len(self.segment_states) - 1 # Fallback
-             
+
         start_state = self.segment_states[start_idx]
 
-        self.branch_idx = self.FRAME_IDX 
-        
+        self.branch_idx = self.FRAME_IDX
+
         # 2. Extract Full Start State and Arm Configs using Helper
         full_qpos_ref = start_state["robot_qpos"]
         start_l_arm, start_r_arm, mapping_info = self._extract_arm_qpos(full_qpos_ref)
         _, l_arm_idxs, r_arm_idxs = mapping_info # Unpack for logic checks
-        
+
         # 3. Formulate Trajectory for Backwards Reconstruction
         # If arm is active, we build the trajectory matrix. If not, we keep it empty.
         qt_l, qt_r = np.zeros((seq_len+1, 0)), np.zeros((seq_len+1, 0))
-        
+
         if len(l_pos)>0 and len(start_l_arm) > 0:
             if len(l_pos) == 0: l_pos = np.tile(start_l_arm, (seq_len, 1)) # Handle mismatched length if needed
             qt_l = np.vstack([start_l_arm, l_pos])
@@ -499,32 +510,32 @@ class OpenLaptopDataGen(open_laptop):
         if len(r_pos)>0 and len(start_r_arm) > 0:
             if len(r_pos) == 0: r_pos = np.tile(start_r_arm, (seq_len, 1))
             qt_r = np.vstack([start_r_arm, r_pos])
-        
+
         # Calculate Deltas: D[t] = Q[t] - Q[t-1]
         deltas_l = qt_l[1:] - qt_l[:-1]
         deltas_r = qt_r[1:] - qt_r[:-1]
-        
+
         # 4. Iterate Samples
         for i in range(n_samples):
             print(f"    Pos Sample {i+1}/{n_samples}: Backwards reconstruction...")
             # Generate Delta Noise
             noise_l = np.random.normal(0, 0.02, deltas_l.shape) if deltas_l.size > 0 else deltas_l
             noise_r = np.random.normal(0, 0.02, deltas_r.shape) if deltas_r.size > 0 else deltas_r
-            
+
             # Reconstruct Trajectory Backwards from Fixed End State
             new_qt_l = np.zeros_like(qt_l)
             new_qt_r = np.zeros_like(qt_r)
-            
+
             if qt_l.size > 0:
                 new_qt_l[-1] = qt_l[-1] # Fix End
                 for t in range(seq_len - 1, -1, -1):
                     new_qt_l[t] = new_qt_l[t+1] - (deltas_l[t] + noise_l[t])
-            
+
             if qt_r.size > 0:
                 new_qt_r[-1] = qt_r[-1] # Fix End
                 for t in range(seq_len - 1, -1, -1):
                     new_qt_r[t] = new_qt_r[t+1] - (deltas_r[t] + noise_r[t])
-            
+
             # Calculate Velocities via forward difference (consistent with new path)
             new_vel_l = (new_qt_l[1:] - new_qt_l[:-1]) if new_qt_l.size > 0 else np.zeros((0,0))
             new_vel_r = (new_qt_r[1:] - new_qt_r[:-1]) if new_qt_r.size > 0 else np.zeros((0,0))
@@ -532,54 +543,433 @@ class OpenLaptopDataGen(open_laptop):
             # Extract New Start State (Arm Only)
             new_start_l_arm = new_qt_l[0] if new_qt_l.size > 0 else np.array([])
             new_start_r_arm = new_qt_r[0] if new_qt_r.size > 0 else np.array([])
-            
+
             # 5. Construct Modified Full Robot State for Simulation using Helper
             new_full_start_qpos = self._inject_arm_qpos(
                 new_start_l_arm, new_start_r_arm, full_qpos_ref, mapping_info
             )
-            
+
             # Set Simulation to New Start State
             modified_state = start_state.copy()
             modified_state["robot_qpos"] = new_full_start_qpos
             self.set_state(modified_state)
-            
+
             # Update metadata
             self.sample_type = 'positive'
             self.start_qpos = new_full_start_qpos
             self.pos_step_idx = 0
-            
+
             # 6. Execution Loop with Reconstructed Targets
             target_l_seq = new_qt_l[1:]
             target_r_seq = new_qt_r[1:]
-            
+
             for t in range(seq_len):
                 # Apply Arm Actions
                 if len(l_arm_idxs) > 0 and target_l_seq.size > 0:
                     self.robot.set_arm_joints(target_l_seq[t], new_vel_l[t], "left")
                 if len(r_arm_idxs) > 0 and target_r_seq.size > 0:
                     self.robot.set_arm_joints(target_r_seq[t], new_vel_r[t], "right")
-                
+
                 # Apply Gripper Actions (Preserve original)
                 if l_grip is not None and t < len(l_grip):
                      self.robot.set_gripper(l_grip[t], "left", control_seq["left_gripper"]["per_step"])
                 if r_grip is not None and t < len(r_grip):
                      self.robot.set_gripper(r_grip[t], "right", control_seq["right_gripper"]["per_step"])
-                     
+
                 self.scene.step()
-                
+
                 if self.check_collision():
                     break
-                    
+
                 self._update_render()
                 if hasattr(self, 'viewer') and self.viewer:
                     self.viewer.render()
                 self._take_picture()
-            
+
             # Loop continues for next sample...
-        
+
         # Reset to Anchor mode
         self.sample_type = 'anchor'
         self.start_qpos = None
+
+    def collect_feasible_grasp_poses(self, actor, arm_tag, contact_point_id=0, pre_grasp_dis=0.08):
+        """
+        Collect all feasible grasp poses for an actor.
+        Returns a list of (pre_grasp_pose, grasp_pose, traj_result) tuples.
+
+        This method explores multiple approach directions and returns all that are reachable.
+        """
+        from copy import deepcopy
+        import transforms3d as t3d
+
+        feasible_poses = []
+
+        # Get base grasp pose from contact point
+        contact_matrix = actor.get_contact_point(contact_point_id, "matrix")
+        if contact_matrix is None:
+            return feasible_poses
+
+        # Transform contact point to grasp frame
+        global_contact_pose_matrix = contact_matrix @ np.array([
+            [0, 0, 1, 0],
+            [-1, 0, 0, 0],
+            [0, -1, 0, 0],
+            [0, 0, 0, 1]
+        ])
+
+        center_pose = actor.get_contact_point(contact_point_id, "list")
+
+        # Generate candidate poses by rotating around different axes
+        # Use robot's create_target_pose_list which rotates around y-axis
+        global_contact_pose_matrix_q = global_contact_pose_matrix[:3, :3]
+        global_grasp_pose_p = (
+            global_contact_pose_matrix[:3, 3] +
+            global_contact_pose_matrix_q @ np.array([-0.12 - pre_grasp_dis, 0, 0]).T
+        )
+        global_grasp_pose_q = t3d.quaternions.mat2quat(global_contact_pose_matrix_q)
+        base_pose = list(global_grasp_pose_p) + list(global_grasp_pose_q)
+
+        # Get candidate poses from robot's rotation scheme
+        candidate_poses = self.robot.create_target_pose_list(base_pose, center_pose, arm_tag)
+
+        # Additionally, add some Z-axis rotations for more variety
+        from envs.utils import transforms as env_transforms
+        z_rotations = [-np.pi/6, -np.pi/12, 0, np.pi/12, np.pi/6]
+        extended_candidates = []
+        for pose in candidate_poses:
+            for z_rot in z_rotations:
+                rotated_pose = env_transforms.rotate_along_axis(
+                    pose, center_pose, [0, 0, 1], z_rot,
+                    axis_type="target", towards=[0, 0, 1]
+                )
+                extended_candidates.append(rotated_pose)
+
+        # Test each candidate for reachability
+        if arm_tag == "left":
+            plan_func = self.robot.left_plan_path
+        else:
+            plan_func = self.robot.right_plan_path
+
+        for pre_pose in extended_candidates:
+            if pre_pose is None or pre_pose[0] == -1:
+                continue
+
+            # Compute the actual grasp pose (closer to object)
+            grasp_pose = deepcopy(pre_pose)
+            grasp_pose = np.array(grasp_pose)
+            direction_mat = t3d.quaternions.quat2mat(grasp_pose[-4:])
+            grasp_pose[:3] += [pre_grasp_dis, 0, 0] @ np.linalg.inv(direction_mat)
+            grasp_pose = grasp_pose.tolist()
+
+            # Test if pre-grasp pose is reachable
+            pre_result = plan_func(pre_pose)
+            if pre_result["status"] != "Success":
+                continue
+
+            # Test if grasp pose is reachable from pre-grasp
+            grasp_result = plan_func(grasp_pose)
+            if grasp_result["status"] != "Success":
+                continue
+
+            feasible_poses.append({
+                'pre_grasp_pose': pre_pose,
+                'grasp_pose': grasp_pose,
+                'pre_grasp_traj': pre_result,
+                'grasp_traj': grasp_result,
+            })
+
+        return feasible_poses
+
+    def sample_pos_via_alt_grasp(self, n_samples=3):
+        """
+        Generate Positive Samples by replaying the task with alternative grasp approaches.
+
+        This method works at the play_once level:
+        1. Save the initial scene state
+        2. Collect all feasible grasp approaches
+        3. For each positive sample, pick a different approach and replay the full task
+        4. Save the trajectory as a positive sample
+
+        Key insight: The task structure is:
+          - Grasp laptop (loop iteration 0: gripper closes on laptop)
+          - Rotate laptop lid (loop iterations 1-14)
+
+        For positive samples, we vary the grasp approach direction while keeping
+        the rest of the task (rotation) following the same logic.
+        """
+        # Ensure folder_path is set (should have been created during anchor collection)
+        if not hasattr(self, 'folder_path') or self.folder_path is None:
+            self.folder_path = {"cache": f"{self.save_dir}/.cache/episode{self.ep_num}/"}
+            if not os.path.exists(self.folder_path["cache"]):
+                os.makedirs(self.folder_path["cache"])
+
+        # 1. Save initial state (before any movement)
+        initial_state = self.get_state()
+
+        # Determine which arm to use (same logic as play_once)
+        face_prod = get_face_prod(self.laptop.get_pose().q, [1, 0, 0], [1, 0, 0])
+        arm_tag = ArmTag("left" if face_prod > 0 else "right")
+
+        # 2. Collect feasible grasp poses BEFORE any movement
+        # We need to be in planning mode to test poses
+        original_need_plan = self.need_plan
+        self.need_plan = True  # Enable planning to test poses
+
+        print(f"Collecting feasible grasp poses for {arm_tag} arm...")
+        feasible_grasps = self.collect_feasible_grasp_poses(
+            self.laptop,
+            arm_tag,
+            contact_point_id=0,
+            pre_grasp_dis=0.08
+        )
+
+        self.need_plan = original_need_plan  # Restore
+
+        if len(feasible_grasps) < 2:
+            print(f"Warning: Only {len(feasible_grasps)} feasible grasp found. Cannot generate positive samples.")
+            return
+
+        print(f"Found {len(feasible_grasps)} feasible grasp approaches")
+
+        # 3. Select different approaches for positive samples
+        # Skip the first one (assumed to be used by anchor) or randomly sample
+        np.random.shuffle(feasible_grasps)
+        selected_grasps = feasible_grasps[:n_samples]
+
+        # 4. Generate positive samples
+        for sample_idx, grasp_info in enumerate(selected_grasps):
+            print(f"\n=== Generating Positive Sample {sample_idx+1}/{n_samples} ===")
+
+            # Reset to initial state
+            self.set_state(initial_state)
+
+            # Reset counters and paths
+            self.left_joint_path = []
+            self.right_joint_path = []
+            self.left_cnt = 0
+            self.right_cnt = 0
+            self.FRAME_IDX = 0
+
+            # Set positive sample mode
+            self.sample_type = 'positive'
+            self.branch_idx = sample_idx
+            self.pos_step_idx = 0
+            self.start_qpos = np.concatenate([
+                self.robot.left_entity.get_qpos(),
+                self.robot.right_entity.get_qpos()
+            ])
+
+            # Execute with the alternative grasp approach
+            success = self._execute_with_grasp(grasp_info, arm_tag)
+
+            if success:
+                print(f"Positive sample {sample_idx+1} completed successfully")
+            else:
+                print(f"Positive sample {sample_idx+1} failed")
+
+        # Reset to anchor mode and restore initial state
+        self.sample_type = 'anchor'
+        self.start_qpos = None
+        self.set_state(initial_state)
+
+    def _execute_with_grasp(self, grasp_info, arm_tag):
+        """
+        Execute the open_laptop task using a specific grasp approach.
+
+        Args:
+            grasp_info: Dict containing pre_grasp_pose, grasp_pose, and trajectories
+            arm_tag: Which arm to use
+
+        Returns:
+            bool: Whether the execution was successful
+        """
+        from envs.utils import Action
+
+        pre_grasp_pose = grasp_info['pre_grasp_pose']
+        grasp_pose = grasp_info['grasp_pose']
+
+        # Phase 1: Move to pre-grasp pose
+        self.current_phase = "grasp"
+
+        # Plan and execute pre-grasp movement
+        self.need_plan = True
+        if arm_tag == "left":
+            pre_result = self.robot.left_plan_path(pre_grasp_pose)
+            self.left_joint_path.append(pre_result)
+        else:
+            pre_result = self.robot.right_plan_path(pre_grasp_pose)
+            self.right_joint_path.append(pre_result)
+
+        if pre_result["status"] != "Success":
+            return False
+
+        # Execute pre-grasp
+        self.need_plan = False
+        control_seq = {
+            "left_arm": pre_result if arm_tag == "left" else None,
+            "left_gripper": None,
+            "right_arm": pre_result if arm_tag == "right" else None,
+            "right_gripper": None,
+        }
+
+        # Save frame before movement
+        self._take_picture()
+
+        # Execute the movement
+        self._execute_control_seq_for_pos(control_seq)
+
+        # Plan and execute grasp movement
+        self.need_plan = True
+        if arm_tag == "left":
+            grasp_result = self.robot.left_plan_path(grasp_pose)
+            self.left_joint_path.append(grasp_result)
+        else:
+            grasp_result = self.robot.right_plan_path(grasp_pose)
+            self.right_joint_path.append(grasp_result)
+
+        if grasp_result["status"] != "Success":
+            return False
+
+        self.need_plan = False
+        control_seq = {
+            "left_arm": grasp_result if arm_tag == "left" else None,
+            "left_gripper": None,
+            "right_arm": grasp_result if arm_tag == "right" else None,
+            "right_gripper": None,
+        }
+        self._execute_control_seq_for_pos(control_seq)
+
+        # Close gripper
+        if arm_tag == "left":
+            gripper_result = self.set_gripper(left_pos=0.0, set_tag="left")
+            control_seq = {
+                "left_arm": None,
+                "left_gripper": gripper_result,
+                "right_arm": None,
+                "right_gripper": None,
+            }
+        else:
+            gripper_result = self.set_gripper(right_pos=0.0, set_tag="right")
+            control_seq = {
+                "left_arm": None,
+                "left_gripper": None,
+                "right_arm": None,
+                "right_gripper": gripper_result,
+            }
+        self._execute_control_seq_for_pos(control_seq)
+
+        # Phase 2: Rotate the laptop lid
+        self.current_phase = "rotate"
+
+        for rot_iter in range(15):
+            # Get target rotation pose
+            self.need_plan = True
+
+            pre_pose, target_pose = self.choose_grasp_pose(
+                self.laptop,
+                arm_tag=arm_tag,
+                pre_dis=0.0,
+                target_dis=0.0,
+                contact_point_id=[1],
+            )
+
+            if target_pose is None:
+                break
+
+            # Plan rotation movement
+            if arm_tag == "left":
+                rot_result = self.robot.left_plan_path(target_pose)
+                self.left_joint_path.append(rot_result)
+            else:
+                rot_result = self.robot.right_plan_path(target_pose)
+                self.right_joint_path.append(rot_result)
+
+            if rot_result["status"] != "Success":
+                break
+
+            # Execute rotation
+            self.need_plan = False
+            control_seq = {
+                "left_arm": rot_result if arm_tag == "left" else None,
+                "left_gripper": None,
+                "right_arm": rot_result if arm_tag == "right" else None,
+                "right_gripper": None,
+            }
+            self._execute_control_seq_for_pos(control_seq)
+
+            # Check success
+            if self.check_success(target=0.5):
+                break
+
+        return self.check_success(target=0.5)
+
+    def _execute_control_seq_for_pos(self, control_seq, save_freq=-1):
+        """
+        Execute a control sequence and save frames for positive samples.
+        Simplified version of take_dense_action for positive sample collection.
+        """
+        left_arm = control_seq.get("left_arm")
+        left_gripper = control_seq.get("left_gripper")
+        right_arm = control_seq.get("right_arm")
+        right_gripper = control_seq.get("right_gripper")
+
+        save_freq = self.save_freq if save_freq == -1 else save_freq
+
+        max_control_len = 0
+        if left_arm is not None and "position" in left_arm:
+            max_control_len = max(max_control_len, left_arm["position"].shape[0])
+        if left_gripper is not None:
+            max_control_len = max(max_control_len, left_gripper["num_step"])
+        if right_arm is not None and "position" in right_arm:
+            max_control_len = max(max_control_len, right_arm["position"].shape[0])
+        if right_gripper is not None:
+            max_control_len = max(max_control_len, right_gripper["num_step"])
+
+        for control_idx in range(max_control_len):
+            # Apply arm controls
+            if left_arm is not None and control_idx < left_arm["position"].shape[0]:
+                self.robot.set_arm_joints(
+                    left_arm["position"][control_idx],
+                    left_arm["velocity"][control_idx],
+                    "left",
+                )
+
+            if left_gripper is not None and control_idx < left_gripper["num_step"]:
+                self.robot.set_gripper(
+                    left_gripper["result"][control_idx],
+                    "left",
+                    left_gripper["per_step"],
+                )
+
+            if right_arm is not None and control_idx < right_arm["position"].shape[0]:
+                self.robot.set_arm_joints(
+                    right_arm["position"][control_idx],
+                    right_arm["velocity"][control_idx],
+                    "right",
+                )
+
+            if right_gripper is not None and control_idx < right_gripper["num_step"]:
+                self.robot.set_gripper(
+                    right_gripper["result"][control_idx],
+                    "right",
+                    right_gripper["per_step"],
+                )
+
+            self.scene.step()
+
+            if self.render_freq and control_idx % self.render_freq == 0:
+                self._update_render()
+                if hasattr(self, 'viewer') and self.viewer:
+                    self.viewer.render()
+
+            # Save frame for positive sample
+            if save_freq is not None and control_idx % save_freq == 0:
+                self._update_render()
+                self._take_picture()
+
+        # Final frame
+        if save_freq is not None:
+            self._take_picture()
 
     def sample_neg_from(self, duration=10, branch_idx=0, active_left=True, active_right=True):
         """
@@ -979,10 +1369,18 @@ class DataProcessor:
                     # "writer": episode_group, # Not used
                 }
             
-                # Run Replay
+                # Run Replay (Anchor trajectory)
                 # This will trigger our callback at every step (or sparse steps)
                 self.env.play_once()
-            
+
+                # Generate positive samples using alternative grasp approaches
+                if (self.env.alt_grasp_pos_config.get("active", False) and
+                    self.env.check_success()):
+                    print(f"\n--- Generating Positive Samples via Alternative Grasp ---")
+                    n_pos_samples = self.env.alt_grasp_pos_config.get("n_samples", 3)
+                    self.env.sample_pos_via_alt_grasp(n_samples=n_pos_samples)
+                    print(f"--- Positive Sampling Complete ---\n")
+
             # merge pkl data to h5 and video
             print(f"Merge pkl to h5 file for episode {epid} and seed {seed}")
             self.env.close_env()
