@@ -7,6 +7,8 @@ import pickle
 from tqdm import tqdm
 import sys
 import yaml
+from copy import deepcopy
+import transforms3d as t3d
 
 # Add workspace to path
 sys.path.append(os.getcwd())
@@ -17,13 +19,15 @@ from envs._base_task import Base_Task
 from envs.utils.save_file import save_pkl
 from envs.utils import ArmTag, get_face_prod
 from envs.utils.pkl2hdf5 import (
-    load_pkl_file, 
-    parse_dict_structure, 
-    append_data_to_structure, 
-    create_hdf5_from_dict, 
+    load_pkl_file,
+    parse_dict_structure,
+    append_data_to_structure,
+    create_hdf5_from_dict,
     images_to_video
 )
 from envs.utils.traj_inspector import analyze_trajectory
+
+from .data_gen_base import DataGenBase, SampleType, SamplingTrigger
 
 def get_embodiment_config(robot_file):
     robot_config_file = os.path.join(robot_file, "config.yml")
@@ -32,36 +36,27 @@ def get_embodiment_config(robot_file):
     return embodiment_args
 
 # Define new class for Data Generation
-class OpenLaptopDataGen(open_laptop):
+class OpenLaptopDataGen(open_laptop, DataGenBase):
     """
-    Extended Open Laptop Env for Data Generation with Negative Sampling
+    Extended Open Laptop Env for Data Generation with Positive/Negative Sampling.
+
+    Inherits from:
+    - open_laptop: Task-specific logic
+    - DataGenBase: Common sampling infrastructure
     """
     def __init__(self):
-        super().__init__()
-        self.sample_type = 'anchor' # 'anchor', 'positive', 'negative'
-        self.start_qpos = None
-        self.branch_idx = 0
-        self.neg_step_idx = 0
-        self.pos_step_idx = 0
-        
-        # New: Counters and Configs for Phase 2
-        self.pos_step_counter = 0
-        self.current_phase = "default" # Tracks current high-level phase
-        
-        # Sampling Configuration per Phase
-        # Allows granular control over when/how samples are generated
+        open_laptop.__init__(self)
+        DataGenBase.__init__(self)
 
-        # neg: grasp interval 100
-        # neg: rot interval 50
+        # Task-specific sampling configuration
         self.sampling_config = {
             "grasp": {
-                "neg": {"active": False, "interval": 400,  "duration": 100},
-                # Original pos method (deprecated for grasp tasks)
+                "neg": {"active": False, "interval": 400, "duration": 100},
                 "pos": {"active": False, "n_samples": 0, "duration": 100}
             },
             "rotate": {
-                "neg": {"active": False, "interval": 500,   "duration": 100},
-                "pos": {"active": False,  "n_samples": 0, "duration": 100}
+                "neg": {"active": False, "interval": 500, "duration": 100},
+                "pos": {"active": False, "n_samples": 0, "duration": 100}
             },
             "default": {
                 "neg": {"active": False, "interval": 999, "duration": 10},
@@ -69,15 +64,15 @@ class OpenLaptopDataGen(open_laptop):
             }
         }
 
-        # New: Alternative grasp-based positive sampling config
-        # This generates positive samples by varying the grasp approach direction
+        # Alternative grasp-based positive sampling
         self.alt_grasp_pos_config = {
             "active": True,
-            "n_samples": 3,  # Number of alternative grasp approaches to try
+            "n_samples": 3,
+            "trigger": SamplingTrigger.ON_PHASE_START,
         }
-        
-        self.neg_duration = 50 # Default fallback
-        self.pos_duration = 50 # Default fallback
+
+        self.neg_duration = 50
+        self.pos_duration = 50
     def check_collision(self):
         """
         Check if robot is in collision with anything other than target.
@@ -110,7 +105,7 @@ class OpenLaptopDataGen(open_laptop):
         """
         Overridden to inject Negative Sampling logic during execution.
         """
-        if self.sample_type == 'anchor':
+        if self.sample_type == SampleType.ANCHOR.value:
             if control_seq.get('left_arm') is not None and 'position' in control_seq['left_arm']:
                 print(f"Executing take_dense_action at frame index {self.FRAME_IDX} with control sequence length {len(control_seq['left_arm']['position'])} ")
 
@@ -147,7 +142,7 @@ class OpenLaptopDataGen(open_laptop):
         for control_idx in range(max_control_len):
              # Record state at the beginning of each step (before action applied)
              # This corresponds to state at index 'control_idx'
-             if save_freq is not None and not self.need_plan and self.sample_type == 'anchor':
+             if save_freq is not None and not self.need_plan and self.sample_type == SampleType.ANCHOR.value:
                   self.segment_states.append(self.get_state())
 
              # --- INJECTED NEGATIVE SAMPLING LOGIC START (Phase 2 Only) ---
@@ -158,9 +153,9 @@ class OpenLaptopDataGen(open_laptop):
              # We only sample negatives if we are NOT planning (need_plan=False) 
              # and we are currently tracking a positive trajectory.
              # Also ensure we are in a data-saving mode (save_freq is not None)
-             if (save_freq is not None and 
-                 not self.need_plan and 
-                 self.sample_type == 'anchor' and
+             if (save_freq is not None and
+                 not self.need_plan and
+                 self.sample_type == SampleType.ANCHOR.value and
                  neg_cfg["active"]):
                  
                  # Using internal counter to be consistent
@@ -238,9 +233,9 @@ class OpenLaptopDataGen(open_laptop):
             phase_cfg = self.sampling_config.get(self.current_phase, self.sampling_config["default"])
             pos_cfg = phase_cfg["pos"]
 
-            if (self.sample_type == 'anchor' and 
-                pos_cfg["active"] and 
-                hasattr(self, 'segment_states') and 
+            if (self.sample_type == SampleType.ANCHOR.value and
+                pos_cfg["active"] and
+                hasattr(self, 'segment_states') and
                 len(self.segment_states) > 0):
                 
                 if pos_cfg["n_samples"] > 0:
@@ -316,94 +311,21 @@ class OpenLaptopDataGen(open_laptop):
         }
         return self.info
 
-    def _take_picture(self):
-        """
-        Overloaded to support saving anchor/positive/negative samples with start_qpos info.
-        This writes pkl files with specific naming convention for Phase 2 data collection.
-        Naming Convention:
-        - Anchor (Main Trajectory): anchor_{FRAME_IDX}.pkl
-        - Negative Branch: neg_branch{anchor_idx}_{step}.pkl
-        - Positive Branch: pos_branch{anchor_idx}_{step}.pkl
-        """
-        if not self.save_data:
-            return
+    # _take_picture is inherited from DataGenBase
 
-        # Initialize cache folder on first anchor frame
-        if self.FRAME_IDX == 0 and self.sample_type == 'anchor':
-            self.folder_path = {"cache": f"{self.save_dir}/.cache/episode{self.ep_num}/"}
-            if not os.path.exists(self.folder_path["cache"]):
-                os.makedirs(self.folder_path["cache"])
-            else:
-                 # Clear previous data only if starting a new positive episode
-                for file in os.listdir(self.folder_path["cache"]):
-                    os.remove(os.path.join(self.folder_path["cache"], file))
-
-        pkl_dic = self.get_obs()
-        
-        # Inject Phase 2 specific metadata
-        pkl_dic['sample_type'] = self.sample_type
-        # Only save start_qpos for branch samples to ensure Anchor consistency
-        if self.sample_type == 'anchor':
-             pkl_dic['start_qpos'] = []
-        else:
-             pkl_dic['start_qpos'] = self.start_qpos if self.start_qpos is not None else []
-        
-        # Determine filename
-        filename = ""
-        if self.sample_type == 'anchor':
-            # Main Trajectory
-            filename = f"anchor_{self.FRAME_IDX}.pkl"
-            self.FRAME_IDX += 1
-        elif self.sample_type == 'negative':
-            # Negative samples designated by branch index and step index
-            filename = f"neg_branch{self.branch_idx}_{self.neg_step_idx}.pkl"
-            self.neg_step_idx += 1
-        elif self.sample_type == 'positive':
-             # Positive samples branching from anchor
-            filename = f"pos_branch{self.branch_idx}_{self.pos_step_idx}.pkl"
-            self.pos_step_idx += 1
-            
-        save_pkl(os.path.join(self.folder_path["cache"], filename), pkl_dic)
-
-    def get_state(self):
-        """
-        Save current simulation state (robot qpos, object pose, etc.)
-        Using SAPIEN's pack function if available or manual
-        """
-        # For full state restore, we ideally use packing. 
-        # But here valid minimal state is: Robot Qpos, Object Pose
-        
-        robot_qpos = np.concatenate([self.robot.left_entity.get_qpos(), self.robot.right_entity.get_qpos()])
-        laptop_pose = self.laptop.actor.get_pose()
-        laptop_qpos = self.laptop.actor.get_qpos()
-        
+    def _get_task_object_states(self):
+        """Get laptop-specific state."""
         return {
-            "robot_qpos": robot_qpos,
-            "laptop_pose": laptop_pose,
-            "laptop_qpos": laptop_qpos
+            "laptop_pose": self.laptop.actor.get_pose(),
+            "laptop_qpos": self.laptop.actor.get_qpos()
         }
 
-    def set_state(self, state):
-        """
-        Restore state
-        """
-        # Robot
-        # Since 'robot.set_qpos' usually needs splitting for left/right entities if separated in logic or combined
-        # In robot.py, left_entity and right_entity are loaded.
-        
-        # We assume splitting logic or just set individually if we stored active joints
-        # Let's use the stored structure:
-        # Assuming robot structure is static (active joints count doesn't change)
-        
-        n_left = len(self.robot.left_entity.get_qpos())
-        self.robot.left_entity.set_qpos(state["robot_qpos"][:n_left])
-        self.robot.right_entity.set_qpos(state["robot_qpos"][n_left:])
-        
-        # Laptop
-        self.laptop.actor.set_pose(state["laptop_pose"])
-        self.laptop.actor.set_qpos(state["laptop_qpos"])
-        
-        # Step physics briefly? No, just set state.
+    def _set_task_object_states(self, state):
+        """Restore laptop state."""
+        if "laptop_pose" in state:
+            self.laptop.actor.set_pose(state["laptop_pose"])
+        if "laptop_qpos" in state:
+            self.laptop.actor.set_qpos(state["laptop_qpos"])
         
     def _extract_arm_qpos(self, full_state_qpos):
         """
@@ -555,7 +477,7 @@ class OpenLaptopDataGen(open_laptop):
             self.set_state(modified_state)
 
             # Update metadata
-            self.sample_type = 'positive'
+            self.sample_type = SampleType.POSITIVE.value
             self.start_qpos = new_full_start_qpos
             self.pos_step_idx = 0
 
@@ -589,7 +511,7 @@ class OpenLaptopDataGen(open_laptop):
             # Loop continues for next sample...
 
         # Reset to Anchor mode
-        self.sample_type = 'anchor'
+        self.sample_type = SampleType.ANCHOR.value
         self.start_qpos = None
 
     def collect_feasible_grasp_poses(self, actor, arm_tag, contact_point_id=0, pre_grasp_dis=0.08):
@@ -751,7 +673,7 @@ class OpenLaptopDataGen(open_laptop):
             self.FRAME_IDX = 0
 
             # Set positive sample mode
-            self.sample_type = 'positive'
+            self.sample_type = SampleType.POSITIVE.value
             self.branch_idx = sample_idx
             self.pos_step_idx = 0
             self.start_qpos = np.concatenate([
@@ -768,7 +690,7 @@ class OpenLaptopDataGen(open_laptop):
                 print(f"Positive sample {sample_idx+1} failed")
 
         # Reset to anchor mode and restore initial state
-        self.sample_type = 'anchor'
+        self.sample_type = SampleType.ANCHOR.value
         self.start_qpos = None
         self.set_state(initial_state)
 
@@ -982,7 +904,7 @@ class OpenLaptopDataGen(open_laptop):
             active_right: Whether to actively perturb the right arm.
         """
         # Set Phase 2 sampling flags
-        self.sample_type = 'negative'
+        self.sample_type = SampleType.NEGATIVE.value
         self.branch_idx = branch_idx
         self.neg_step_idx = 0
         
@@ -1027,10 +949,12 @@ class OpenLaptopDataGen(open_laptop):
             self._take_picture()
         
         # Reset flags (State restoration is caller's responsibility)
-        self.sample_type = 'anchor'
+        self.sample_type = SampleType.ANCHOR.value
         self.start_qpos = None
 
-    def merge_pkl_to_hdf5_video(self):
+    # merge_pkl_to_hdf5_video is inherited from DataGenBase
+
+    def merge_pkl_to_hdf5_video_legacy(self):
         """
         Synthesize .pkl files (positive & negative) into a structured HDF5 and MP4 video.
         Structure:
