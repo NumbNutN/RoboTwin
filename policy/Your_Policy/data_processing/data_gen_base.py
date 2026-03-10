@@ -573,12 +573,51 @@ class DataGenBase:
             process_branches(neg_files, "negative_trajs")
             process_branches(pos_branch_files, "positive_trajs")
 
-        # Generate video
+        # Generate videos
         try:
+            # Anchor video
             if "observation" in full_data and "head_camera" in full_data["observation"]:
                 rgb_seq = np.array(full_data["observation"]["head_camera"]["rgb"])
                 images_to_video(rgb_seq, out_path=target_video_path)
-                print(f"[DataGen] Video saved to {target_video_path}")
+                print(f"[DataGen] Anchor video saved to {target_video_path}")
+
+            # Positive branch videos
+            for b_idx in sorted(pos_branch_files.keys()):
+                steps = sorted(pos_branch_files[b_idx], key=lambda x: x[0])
+                step_paths = [x[1] for x in steps]
+                if not step_paths:
+                    continue
+                first_frame = load_pkl_file(step_paths[0])
+                b_data = parse_dict_structure(first_frame)
+                for pkl_path in step_paths:
+                    d = load_pkl_file(pkl_path)
+                    append_data_to_structure(b_data, d)
+                if "observation" in b_data and "head_camera" in b_data["observation"]:
+                    pos_video_path = target_video_path.replace(
+                        ".mp4", f"_pos_branch{b_idx}.mp4"
+                    )
+                    rgb_seq = np.array(b_data["observation"]["head_camera"]["rgb"])
+                    images_to_video(rgb_seq, out_path=pos_video_path)
+                    print(f"[DataGen] Positive branch {b_idx} video saved to {pos_video_path}")
+
+            # Negative branch videos
+            for b_idx in sorted(neg_files.keys()):
+                steps = sorted(neg_files[b_idx], key=lambda x: x[0])
+                step_paths = [x[1] for x in steps]
+                if not step_paths:
+                    continue
+                first_frame = load_pkl_file(step_paths[0])
+                b_data = parse_dict_structure(first_frame)
+                for pkl_path in step_paths:
+                    d = load_pkl_file(pkl_path)
+                    append_data_to_structure(b_data, d)
+                if "observation" in b_data and "head_camera" in b_data["observation"]:
+                    neg_video_path = target_video_path.replace(
+                        ".mp4", f"_neg_branch{b_idx}.mp4"
+                    )
+                    rgb_seq = np.array(b_data["observation"]["head_camera"]["rgb"])
+                    images_to_video(rgb_seq, out_path=neg_video_path)
+                    print(f"[DataGen] Negative branch {b_idx} video saved to {neg_video_path}")
         except Exception as e:
             print(f"[DataGen] Error creating video: {e}")
 

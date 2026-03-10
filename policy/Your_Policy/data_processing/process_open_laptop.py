@@ -73,6 +73,41 @@ class OpenLaptopDataGen(open_laptop, DataGenBase):
 
         self.neg_duration = 50
         self.pos_duration = 50
+
+    def setup_demo(self, **kwargs):
+        """Override to re-apply sampling config after parent init."""
+        super().setup_demo(**kwargs)
+        # _init_task_env_ calls super().__init__() which re-runs DataGenBase.__init__
+        # and resets configs to defaults. Re-apply our task-specific config here.
+        self.sampling_config = {
+            "grasp": {
+                "neg": {"active": False, "interval": 100, "duration": 50},
+                "pos": {"active": False, "n_samples": 0, "duration": 50}
+            },
+            "rotate": {
+                "neg": {"active": False, "interval": 200, "duration": 50},
+                "pos": {"active": False, "n_samples": 0, "duration": 50}
+            },
+            "default": {
+                "neg": {"active": False, "interval": 999, "duration": 10},
+                "pos": {"active": False, "n_samples": 0, "duration": 10}
+            }
+        }
+        self.alt_grasp_pos_config = {
+            "active": True,
+            "n_samples": 2,
+            "trigger": SamplingTrigger.ON_PHASE_START,
+        }
+        self._current_bread_idx = None
+        self._grasp_states_for_pos = []
+
+    def merge_pkl_to_hdf5_video(self):
+        """Use DataGenBase's version which handles pos/neg branch videos."""
+        DataGenBase.merge_pkl_to_hdf5_video(self)
+
+    def _take_picture(self):
+        return DataGenBase._take_picture(self)
+
     def check_collision(self):
         """
         Check if robot is in collision with anything other than target.

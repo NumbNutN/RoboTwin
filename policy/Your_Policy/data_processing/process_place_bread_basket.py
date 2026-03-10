@@ -93,6 +93,44 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         self._current_bread_idx = None
         self._grasp_states_for_pos = []  # Can have multiple grasps (dual arm)
 
+    def setup_demo(self, **kwargs):
+        """Override to re-apply sampling config after parent init."""
+        super().setup_demo(**kwargs)
+        # _init_task_env_ calls super().__init__() which re-runs DataGenBase.__init__
+        # and resets configs to defaults. Re-apply our task-specific config here.
+        self.sampling_config = {
+            "grasp": {
+                "neg": {"active": False, "interval": 100, "duration": 50},
+                "pos": {"active": False, "n_samples": 0, "duration": 50}
+            },
+            "lift": {
+                "neg": {"active": False, "interval": 200, "duration": 50},
+                "pos": {"active": False, "n_samples": 0, "duration": 50}
+            },
+            "place": {
+                "neg": {"active": False, "interval": 150, "duration": 50},
+                "pos": {"active": False, "n_samples": 0, "duration": 50}
+            },
+            "default": {
+                "neg": {"active": False, "interval": 999, "duration": 10},
+                "pos": {"active": False, "n_samples": 0, "duration": 10}
+            }
+        }
+        self.alt_grasp_pos_config = {
+            "active": True,
+            "n_samples": 2,
+            "trigger": SamplingTrigger.ON_GRASP_COMPLETE,
+        }
+        self._current_bread_idx = None
+        self._grasp_states_for_pos = []
+
+    def merge_pkl_to_hdf5_video(self):
+        """Use DataGenBase's version which handles pos/neg branch videos."""
+        DataGenBase.merge_pkl_to_hdf5_video(self)
+
+    def _take_picture(self):
+        return DataGenBase._take_picture(self)
+
     def _get_task_object_states(self):
         """Save bread and basket states."""
         states = {
@@ -102,13 +140,13 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         return states
 
     def _set_task_object_states(self, state):
-        """Restore bread and basket states."""
+        """Restore bread and basket states via underlying SAPIEN Entity."""
         if "breadbasket_pose" in state:
-            self.breadbasket.set_pose(state["breadbasket_pose"])
+            self.breadbasket.actor.set_pose(state["breadbasket_pose"])
         if "bread_poses" in state:
             for i, pose in enumerate(state["bread_poses"]):
                 if i < len(self.bread):
-                    self.bread[i].set_pose(pose)
+                    self.bread[i].actor.set_pose(pose)
 
     def take_dense_action(self, control_seq, save_freq=-1):
         """
@@ -712,6 +750,7 @@ class DataProcessor:
             print(f"Merging to HDF5 for episode {epid}")
             self.env.close_env()
             self.env.merge_pkl_to_hdf5_video()
+            breakpoint()
 
             if not self.env.check_success():
                 print(f"Warning: Episode {epid} did not succeed!")
