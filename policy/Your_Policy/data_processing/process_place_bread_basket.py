@@ -1,14 +1,11 @@
 """
 Data generation for place_bread_basket task with positive/negative sampling.
 
-This module provides:
-- PlaceBreadBasketDataGen: Extended environment for data collection
-- DataProcessor: Main data collection pipeline
-
 Positive sampling strategy:
-- Triggered AFTER the gripper grasps the bread
-- Generates alternative trajectories for the "lift and place" phase
-- Varies the placement approach direction
+- During anchor replay, maintains a rolling buffer of states during grasp phase
+- After play_once, restores to N steps BEFORE grasp completes
+- Re-plans and executes grasp -> lift -> place with need_plan=True
+  (same API as envs/place_bread_basket.py)
 
 Negative sampling strategy:
 - Injects noise during the placement phase
@@ -18,6 +15,7 @@ import os
 import h5py
 import numpy as np
 import pickle
+import sapien
 from tqdm import tqdm
 import sys
 import yaml
@@ -51,53 +49,19 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
     """
     Extended place_bread_basket environment for data generation with sampling.
 
-    Key differences from base class:
-    1. Tracks grasp completion for positive sampling triggers
-    2. Overrides take_dense_action for negative sampling injection
-    3. Implements alternative grasp-based positive sampling
+    Positive sampling: captures rolling state buffer during grasp phase,
+    then restores to N steps before grasp completes and re-plans via move() API.
     """
+
+    PRE_GRASP_STEPS = 30  # Save state from N steps before grasp completes
 
     def __init__(self):
         place_bread_basket.__init__(self)
         DataGenBase.__init__(self)
+        self._init_sampling_config()
 
-        # Task-specific sampling configuration
-        self.sampling_config = {
-            "grasp": {
-                "neg": {"active": False, "interval": 100, "duration": 50},
-                "pos": {"active": False, "n_samples": 0, "duration": 50}
-            },
-            "lift": {
-                "neg": {"active": False, "interval": 200, "duration": 50},
-                "pos": {"active": False, "n_samples": 0, "duration": 50}
-            },
-            "place": {
-                "neg": {"active": True, "interval": 150, "duration": 50},
-                "pos": {"active": False, "n_samples": 0, "duration": 50}
-            },
-            "default": {
-                "neg": {"active": False, "interval": 999, "duration": 10},
-                "pos": {"active": False, "n_samples": 0, "duration": 10}
-            }
-        }
-
-        # Alternative grasp-based positive sampling
-        # Triggered after grasp completes
-        self.alt_grasp_pos_config = {
-            "active": True,
-            "n_samples": 2,
-            "trigger": SamplingTrigger.ON_GRASP_COMPLETE,
-        }
-
-        # Track which bread is being handled
-        self._current_bread_idx = None
-        self._grasp_states_for_pos = []  # Can have multiple grasps (dual arm)
-
-    def setup_demo(self, **kwargs):
-        """Override to re-apply sampling config after parent init."""
-        super().setup_demo(**kwargs)
-        # _init_task_env_ calls super().__init__() which re-runs DataGenBase.__init__
-        # and resets configs to defaults. Re-apply our task-specific config here.
+    def _init_sampling_config(self):
+        """Initialize/re-initialize all sampling configuration."""
         self.sampling_config = {
             "grasp": {
                 "neg": {"active": False, "interval": 100, "duration": 50},
@@ -123,24 +87,31 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         }
         self._current_bread_idx = None
         self._grasp_states_for_pos = []
+        self._grasp_state_buffer = []  # Rolling buffer for pre-grasp states
+
+    def setup_demo(self, **kwargs):
+        """Override to re-apply sampling config after parent init resets."""
+        super().setup_demo(**kwargs)
+        self._init_sampling_config()
+
+    # ==================== MRO Overrides ====================
+    # Base_Task defines these too; explicitly delegate to DataGenBase.
 
     def merge_pkl_to_hdf5_video(self):
-        """Use DataGenBase's version which handles pos/neg branch videos."""
         DataGenBase.merge_pkl_to_hdf5_video(self)
 
     def _take_picture(self):
         return DataGenBase._take_picture(self)
 
+    # ==================== State Management ====================
+
     def _get_task_object_states(self):
-        """Save bread and basket states."""
-        states = {
+        return {
             "breadbasket_pose": self.breadbasket.get_pose(),
             "bread_poses": [b.get_pose() for b in self.bread],
         }
-        return states
 
     def _set_task_object_states(self, state):
-        """Restore bread and basket states via underlying SAPIEN Entity."""
         if "breadbasket_pose" in state:
             self.breadbasket.actor.set_pose(state["breadbasket_pose"])
         if "bread_poses" in state:
@@ -148,25 +119,43 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                 if i < len(self.bread):
                     self.bread[i].actor.set_pose(pose)
 
-    def take_dense_action(self, control_seq, save_freq=-1):
-        """
-        Override to inject sampling logic during execution.
-        """
-        if self.sample_type == SampleType.ANCHOR.value:
-            if control_seq.get('left_arm') is not None and 'position' in control_seq['left_arm']:
-                print(f"[PlaceBread] Executing at frame {self.FRAME_IDX}, "
-                      f"control len {len(control_seq['left_arm']['position'])}")
+    # ==================== Rolling Buffer ====================
 
-        # Unpack control sequence
+    def _capture_grasp_state(self):
+        """Append current state to rolling buffer (during grasp phase only)."""
+        self._grasp_state_buffer.append(self.get_state())
+        max_size = self.PRE_GRASP_STEPS + 10
+        if len(self._grasp_state_buffer) > max_size:
+            self._grasp_state_buffer = self._grasp_state_buffer[-self.PRE_GRASP_STEPS:]
+
+    def _get_pre_grasp_state(self):
+        """Return the state from N steps before the end of the buffer."""
+        if not self._grasp_state_buffer:
+            return self.get_state()
+        N = min(self.PRE_GRASP_STEPS, len(self._grasp_state_buffer))
+        return self._grasp_state_buffer[-N]
+
+    # ==================== Execution Overrides ====================
+
+    def _should_save_frames(self):
+        """Whether to save frames in the current mode.
+        - Anchor replay (need_plan=False, ANCHOR): save
+        - Positive/Negative sampling (need_plan=True, non-ANCHOR): save
+        - Initial planning (need_plan=True, ANCHOR): don't save
+        """
+        return not self.need_plan or self.sample_type != SampleType.ANCHOR.value
+
+    def take_dense_action(self, control_seq, save_freq=-1):
+        """Override with rolling buffer capture and pos-sample frame saving."""
         left_arm = control_seq.get("left_arm")
         left_gripper = control_seq.get("left_gripper")
         right_arm = control_seq.get("right_arm")
         right_gripper = control_seq.get("right_gripper")
 
         save_freq = self.save_freq if save_freq == -1 else save_freq
+        should_save = save_freq is not None and self._should_save_frames()
 
-        # Initial save
-        if save_freq is not None and not self.need_plan:
+        if should_save:
             self._take_picture()
 
         max_control_len = 0
@@ -179,38 +168,12 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         if right_gripper is not None:
             max_control_len = max(max_control_len, right_gripper["num_step"])
 
-        # Reset segment history
-        self.segment_states = []
-
         for control_idx in range(max_control_len):
-            # Record state for sampling
-            if save_freq is not None and not self.need_plan and self.sample_type == SampleType.ANCHOR.value:
-                self.segment_states.append(self.get_state())
-
-            # Negative sampling injection
-            phase_cfg = self.sampling_config.get(self.current_phase, self.sampling_config["default"])
-            neg_cfg = phase_cfg["neg"]
-
-            if (save_freq is not None and
-                not self.need_plan and
-                self.sample_type == SampleType.ANCHOR.value and
-                neg_cfg["active"]):
-
-                if self.pos_step_counter % neg_cfg["interval"] == 0 and self.pos_step_counter > 0:
-                    state_backup = self.get_state()
-
-                    print(f"[PlaceBread] Generating Negative Sample at Frame {self.FRAME_IDX}")
-                    self.sample_neg_from(
-                        duration=neg_cfg["duration"],
-                        branch_idx=self.FRAME_IDX,
-                        active_left=(left_arm is not None),
-                        active_right=(right_arm is not None)
-                    )
-
-                    self.set_state(state_backup)
-                    print(f"[PlaceBread] Restored to anchor at Frame {self.FRAME_IDX}")
-
-                self.pos_step_counter += 1
+            # Rolling buffer: capture state during grasp phase of anchor replay
+            if (self.current_phase == "grasp"
+                    and self.sample_type == SampleType.ANCHOR.value
+                    and not self.need_plan):
+                self._capture_grasp_state()
 
             # Execute controls
             if left_arm is not None and control_idx < left_arm["position"].shape[0]:
@@ -219,21 +182,18 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                     left_arm["velocity"][control_idx],
                     "left",
                 )
-
             if left_gripper is not None and control_idx < left_gripper["num_step"]:
                 self.robot.set_gripper(
                     left_gripper["result"][control_idx],
                     "left",
                     left_gripper["per_step"],
                 )
-
             if right_arm is not None and control_idx < right_arm["position"].shape[0]:
                 self.robot.set_arm_joints(
                     right_arm["position"][control_idx],
                     right_arm["velocity"][control_idx],
                     "right",
                 )
-
             if right_gripper is not None and control_idx < right_gripper["num_step"]:
                 self.robot.set_gripper(
                     right_gripper["result"][control_idx],
@@ -248,51 +208,142 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                 if hasattr(self, 'viewer') and self.viewer:
                     self.viewer.render()
 
-            if save_freq is not None and control_idx % save_freq == 0 and not self.need_plan:
+            if should_save and control_idx % save_freq == 0:
                 self._update_render()
                 self._take_picture()
 
-        # Final save
-        if save_freq is not None and not self.need_plan:
+        if should_save:
             self._take_picture()
-
         return True
 
-    def play_once(self):
-        """
-        Override play_once to add grasp completion hooks.
+    def together_move_to_pose(
+        self,
+        left_target_pose,
+        right_target_pose,
+        left_constraint_pose=None,
+        right_constraint_pose=None,
+        use_point_cloud=False,
+        use_attach=False,
+        save_freq=-1,
+    ):
+        """Override to add rolling buffer capture during grasp phase."""
+        if not self.plan_success:
+            return
+        if left_target_pose is None or right_target_pose is None:
+            self.plan_success = False
+            return
+        if type(left_target_pose) == sapien.Pose:
+            left_target_pose = left_target_pose.p.tolist() + left_target_pose.q.tolist()
+        if type(right_target_pose) == sapien.Pose:
+            right_target_pose = right_target_pose.p.tolist() + right_target_pose.q.tolist()
 
-        The task structure:
-        1. Grasp bread(s) - TRIGGER POINT for positive sampling
-        2. Lift
-        3. Place into basket
-        """
+        save_freq = self.save_freq if save_freq == -1 else save_freq
+
+        if self.need_plan:
+            left_result = self.robot.left_plan_path(
+                left_target_pose, constraint_pose=left_constraint_pose
+            )
+            right_result = self.robot.right_plan_path(
+                right_target_pose, constraint_pose=right_constraint_pose
+            )
+            self.left_joint_path.append(deepcopy(left_result))
+            self.right_joint_path.append(deepcopy(right_result))
+        else:
+            left_result = deepcopy(self.left_joint_path[self.left_cnt])
+            right_result = deepcopy(self.right_joint_path[self.right_cnt])
+            self.left_cnt += 1
+            self.right_cnt += 1
+
+        try:
+            left_success = left_result["status"] == "Success"
+            right_success = right_result["status"] == "Success"
+            if not left_success or not right_success:
+                self.plan_success = False
+        except Exception:
+            if left_result is None or right_result is None:
+                self.plan_success = False
+                return
+
+        should_save = save_freq is not None and self._should_save_frames()
+
+        if should_save:
+            self._take_picture()
+
+        now_left_id = 0
+        now_right_id = 0
+        i = 0
+        left_n_step = left_result["position"].shape[0] if left_success else 0
+        right_n_step = right_result["position"].shape[0] if right_success else 0
+
+        while now_left_id < left_n_step or now_right_id < right_n_step:
+            # Rolling buffer: capture state during grasp phase of anchor replay
+            if (self.current_phase == "grasp"
+                    and self.sample_type == SampleType.ANCHOR.value
+                    and not self.need_plan):
+                self._capture_grasp_state()
+
+            if (left_success and now_left_id < left_n_step
+                    and (not right_success or now_left_id / left_n_step <= now_right_id / right_n_step)):
+                self.robot.set_arm_joints(
+                    left_result["position"][now_left_id],
+                    left_result["velocity"][now_left_id],
+                    "left",
+                )
+                now_left_id += 1
+
+            if (right_success and now_right_id < right_n_step
+                    and (not left_success or now_right_id / right_n_step <= now_left_id / left_n_step)):
+                self.robot.set_arm_joints(
+                    right_result["position"][now_right_id],
+                    right_result["velocity"][now_right_id],
+                    "right",
+                )
+                now_right_id += 1
+
+            self.scene.step()
+            if self.render_freq and i % self.render_freq == 0:
+                self._update_render()
+                if hasattr(self, 'viewer') and self.viewer:
+                    self.viewer.render()
+
+            if should_save and i % save_freq == 0:
+                self._update_render()
+                self._take_picture()
+            i += 1
+
+        if should_save:
+            self._take_picture()
+
+    # ==================== play_once ====================
+
+    def play_once(self):
+        """Override with pre-grasp rolling-buffer state capture."""
 
         def remove_bread_with_hook(bread_idx, num):
-            """Modified remove_bread that triggers grasp hook."""
             arm_tag = ArmTag("right" if self.bread[bread_idx].get_pose().p[0] > 0 else "left")
             self._current_bread_idx = bread_idx
 
-            # Phase: Grasp
+            # Phase: Grasp - buffer capture starts
             self.current_phase = "grasp"
+            self._grasp_state_buffer = []
 
-            # Grasp the bread
             self.move(self.grasp_actor(self.bread[bread_idx], arm_tag=arm_tag, pre_grasp_dis=0.07))
 
-            # *** TRIGGER: Grasp Complete ***
-            # Save state for positive sampling AFTER grasp
+            # Save pre-grasp state (N steps before grasp complete)
             if (not self.need_plan and
-                self.sample_type == SampleType.ANCHOR.value and
-                self.alt_grasp_pos_config.get("active", False)):
-
+                    self.sample_type == SampleType.ANCHOR.value and
+                    self.alt_grasp_pos_config.get("active", False)):
                 self._grasp_states_for_pos.append({
-                    'state': self.get_state(),
+                    'state': self._get_pre_grasp_state(),
                     'bread_idx': bread_idx,
                     'arm_tag': str(arm_tag),
                     'frame_idx': self.FRAME_IDX,
-                    'remaining_actions': num,  # 0 = first bread, 1 = second
+                    'remaining_actions': num,
+                    'dual_grasp': False,
                 })
-                print(f"[PlaceBread] Saved grasp state for bread {bread_idx} at frame {self.FRAME_IDX}")
+                print(f"[PlaceBread] Saved pre-grasp state for bread {bread_idx} "
+                      f"(buffer={len(self._grasp_state_buffer)}) at frame {self.FRAME_IDX}")
+                self._grasp_state_buffer = []
 
             # Phase: Lift
             self.current_phase = "lift"
@@ -301,14 +352,10 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             # Phase: Place
             self.current_phase = "place"
             breadbasket_pose = self.breadbasket.get_functional_point(0)
-            self.move(
-                self.place_actor(
-                    self.bread[bread_idx],
-                    arm_tag=arm_tag,
-                    target_pose=breadbasket_pose,
-                    constrain="free",
-                    pre_dis=0.12,
-                ))
+            self.move(self.place_actor(
+                self.bread[bread_idx], arm_tag=arm_tag,
+                target_pose=breadbasket_pose, constrain="free", pre_dis=0.12,
+            ))
 
             if num == 0:
                 self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.15, move_axis="arm"))
@@ -316,31 +363,32 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                 self.move(self.open_gripper(arm_tag=arm_tag))
 
         def remove_dual_with_hook():
-            """Modified dual-arm removal with grasp hooks."""
             id = 0 if self.bread[0].get_pose().p[0] < 0 else 1
 
-            # Phase: Grasp (dual)
+            # Phase: Grasp - buffer capture starts
             self.current_phase = "grasp"
+            self._grasp_state_buffer = []
 
             self.move(
                 self.grasp_actor(self.bread[id], arm_tag="left", pre_grasp_dis=0.05),
                 self.grasp_actor(self.bread[id ^ 1], arm_tag="right", pre_grasp_dis=0.07),
             )
 
-            # *** TRIGGER: Dual Grasp Complete ***
+            # Save pre-grasp state
             if (not self.need_plan and
-                self.sample_type == SampleType.ANCHOR.value and
-                self.alt_grasp_pos_config.get("active", False)):
-
+                    self.sample_type == SampleType.ANCHOR.value and
+                    self.alt_grasp_pos_config.get("active", False)):
                 self._grasp_states_for_pos.append({
-                    'state': self.get_state(),
-                    'bread_idx': id,  # Left arm bread
+                    'state': self._get_pre_grasp_state(),
+                    'bread_idx': id,
                     'arm_tag': 'left',
                     'frame_idx': self.FRAME_IDX,
                     'dual_grasp': True,
                     'other_bread_idx': id ^ 1,
                 })
-                print(f"[PlaceBread] Saved dual-grasp state at frame {self.FRAME_IDX}")
+                print(f"[PlaceBread] Saved pre-grasp dual state "
+                      f"(buffer={len(self._grasp_state_buffer)}) at frame {self.FRAME_IDX}")
+                self._grasp_state_buffer = []
 
             # Phase: Lift
             self.current_phase = "lift"
@@ -353,30 +401,20 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             self.current_phase = "place"
             breadbasket_pose = self.breadbasket.get_functional_point(0)
 
-            self.move(
-                self.place_actor(
-                    self.bread[id],
-                    arm_tag="left",
-                    target_pose=breadbasket_pose,
-                    constrain="free",
-                    pre_dis=0.13,
-                ))
-
+            self.move(self.place_actor(
+                self.bread[id], arm_tag="left",
+                target_pose=breadbasket_pose, constrain="free", pre_dis=0.13,
+            ))
             self.move(self.move_by_displacement(arm_tag="left", z=0.1, move_axis="arm"))
-
             self.move(
                 self.back_to_origin(arm_tag="left"),
                 self.place_actor(
-                    self.bread[id ^ 1],
-                    arm_tag="right",
-                    target_pose=breadbasket_pose,
-                    constrain="free",
-                    pre_dis=0.13,
-                    dis=0.05,
+                    self.bread[id ^ 1], arm_tag="right",
+                    target_pose=breadbasket_pose, constrain="free", pre_dis=0.13, dis=0.05,
                 ),
             )
 
-        # Clear previous grasp states
+        # ---- Main play_once logic ----
         self._grasp_states_for_pos = []
 
         arm_info = None
@@ -400,41 +438,45 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         }
         if len(self.bread) == 2:
             self.info["info"]["{C}"] = f"075_bread/base{self.bread_id[1]}"
-
         return self.info
+
+    # ==================== Positive Sampling ====================
 
     def sample_pos_from_grasp_states(self, n_samples_per_grasp=2):
         """
-        Generate positive samples from saved grasp states.
-
-        For each saved grasp state, generates alternative trajectories
-        for the lift-and-place phase.
+        Restore to pre-grasp state and re-plan grasp -> lift -> place
+        using the same move() API as place_bread_basket.play_once.
         """
         if not self._grasp_states_for_pos:
             print("[PlaceBread] No grasp states saved for positive sampling")
             return
 
-        print(f"\n=== Generating Positive Samples from {len(self._grasp_states_for_pos)} Grasp States ===")
+        print(f"\n=== Generating Positive Samples from "
+              f"{len(self._grasp_states_for_pos)} Grasp States ===")
+
+        # Save original replay state
+        saved_ljp = self.left_joint_path
+        saved_rjp = self.right_joint_path
+        saved_lcnt = self.left_cnt
+        saved_rcnt = self.right_cnt
+        saved_need_plan = self.need_plan
 
         for grasp_idx, grasp_info in enumerate(self._grasp_states_for_pos):
             print(f"\n--- Processing Grasp State {grasp_idx + 1} ---")
 
-            # Restore to grasp-complete state
-            initial_state = grasp_info['state']
-            arm_tag = ArmTag(grasp_info['arm_tag'])
-            bread_idx = grasp_info['bread_idx']
-
             for sample_idx in range(n_samples_per_grasp):
                 print(f"  Positive Sample {sample_idx + 1}/{n_samples_per_grasp}")
 
-                # Reset to grasp state
-                self.set_state(initial_state)
+                # Restore to pre-grasp state
+                self.set_state(grasp_info['state'])
 
-                # Reset counters
+                # Reset planning state for re-planning
                 self.left_joint_path = []
                 self.right_joint_path = []
                 self.left_cnt = 0
                 self.right_cnt = 0
+                self.need_plan = True
+                self.plan_success = True
 
                 # Set positive sample mode
                 self.sample_type = SampleType.POSITIVE.value
@@ -445,202 +487,110 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                     self.robot.right_entity.get_qpos()
                 ])
 
-                # Execute alternative lift-and-place with variation
-                success = self._execute_alternative_place(
-                    bread_idx, arm_tag, sample_idx
-                )
+                # Re-plan and execute: grasp -> lift -> place
+                success = self._replay_grasp_and_place(grasp_info)
 
                 if success:
                     print(f"    Sample {sample_idx + 1} completed successfully")
                 else:
-                    print(f"    Sample {sample_idx + 1} failed")
+                    print(f"    Sample {sample_idx + 1} failed "
+                          f"(plan_success={self.plan_success})")
 
-        # Reset to anchor mode
+        # Restore original state
         self.sample_type = SampleType.ANCHOR.value
         self.start_qpos = None
+        self.need_plan = saved_need_plan
+        self.left_joint_path = saved_ljp
+        self.right_joint_path = saved_rjp
+        self.left_cnt = saved_lcnt
+        self.right_cnt = saved_rcnt
         self._grasp_states_for_pos = []
 
-    def _execute_alternative_place(self, bread_idx, arm_tag, variation_idx):
-        """
-        Execute lift-and-place with variation for positive sampling.
-
-        Variations:
-        - Different lift heights
-        - Different approach angles to basket
-        """
-        # Variation parameters
-        lift_heights = [0.08, 0.12, 0.15]
-        pre_dis_values = [0.10, 0.14, 0.16]
-
-        lift_z = lift_heights[variation_idx % len(lift_heights)]
-        pre_dis = pre_dis_values[variation_idx % len(pre_dis_values)]
-
-        # Phase: Lift (with variation)
-        self.need_plan = True
-
-        if str(arm_tag) == "left":
-            origin_pose = np.array(self.robot.get_left_ee_pose(), dtype=np.float64)
+    def _replay_grasp_and_place(self, grasp_info):
+        """Re-execute grasp -> lift -> place with need_plan=True."""
+        if grasp_info.get('dual_grasp', False):
+            return self._replay_dual(grasp_info)
         else:
-            origin_pose = np.array(self.robot.get_right_ee_pose(), dtype=np.float64)
+            return self._replay_single(grasp_info)
 
-        # Add small random offset to lift direction
-        lift_offset = np.random.uniform(-0.02, 0.02, 2)
-        target_pose = origin_pose.copy()
-        target_pose[0] += lift_offset[0]
-        target_pose[1] += lift_offset[1]
-        target_pose[2] += lift_z
+    def _replay_single(self, grasp_info):
+        """Single-arm: grasp -> lift -> place (mirrors remove_bread in play_once)."""
+        arm_tag = ArmTag(grasp_info['arm_tag'])
+        bread_idx = grasp_info['bread_idx']
+        num = grasp_info.get('remaining_actions', 0)
 
-        if str(arm_tag) == "left":
-            lift_result = self.robot.left_plan_path(target_pose.tolist())
-        else:
-            lift_result = self.robot.right_plan_path(target_pose.tolist())
-
-        if lift_result["status"] != "Success":
+        # Grasp
+        self.move(self.grasp_actor(
+            self.bread[bread_idx], arm_tag=arm_tag, pre_grasp_dis=0.07
+        ))
+        if not self.plan_success:
             return False
 
-        # Execute lift
-        self.need_plan = False
-        control_seq = {
-            "left_arm": lift_result if str(arm_tag) == "left" else None,
-            "left_gripper": None,
-            "right_arm": lift_result if str(arm_tag) == "right" else None,
-            "right_gripper": None,
-        }
-        self._execute_control_seq_for_pos(control_seq)
+        # Lift
+        self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.1, move_axis="arm"))
+        if not self.plan_success:
+            return False
 
-        # Phase: Place (with variation)
-        self.need_plan = True
+        # Place
         breadbasket_pose = self.breadbasket.get_functional_point(0)
-
-        # Get place pose with variation
-        place_pre_pose = self.get_place_pose(
-            self.bread[bread_idx],
-            arm_tag,
-            breadbasket_pose,
-            pre_dis=pre_dis,
-            constrain="free",
-        )
-
-        place_pose = self.get_place_pose(
-            self.bread[bread_idx],
-            arm_tag,
-            breadbasket_pose,
-            pre_dis=0.02,
-            constrain="free",
-        )
-
-        if str(arm_tag) == "left":
-            pre_result = self.robot.left_plan_path(place_pre_pose)
-            place_result = self.robot.left_plan_path(place_pose)
-        else:
-            pre_result = self.robot.right_plan_path(place_pre_pose)
-            place_result = self.robot.right_plan_path(place_pose)
-
-        if pre_result["status"] != "Success":
+        self.move(self.place_actor(
+            self.bread[bread_idx], arm_tag=arm_tag,
+            target_pose=breadbasket_pose, constrain="free", pre_dis=0.12,
+        ))
+        if not self.plan_success:
             return False
 
-        # Execute pre-place
-        self.need_plan = False
-        control_seq = {
-            "left_arm": pre_result if str(arm_tag) == "left" else None,
-            "left_gripper": None,
-            "right_arm": pre_result if str(arm_tag) == "right" else None,
-            "right_gripper": None,
-        }
-        self._execute_control_seq_for_pos(control_seq)
-
-        # Execute place
-        if place_result["status"] == "Success":
-            control_seq = {
-                "left_arm": place_result if str(arm_tag) == "left" else None,
-                "left_gripper": None,
-                "right_arm": place_result if str(arm_tag) == "right" else None,
-                "right_gripper": None,
-            }
-            self._execute_control_seq_for_pos(control_seq)
-
-        # Open gripper
-        if str(arm_tag) == "left":
-            gripper_result = self.set_gripper(left_pos=1.0, set_tag="left")
-            control_seq = {
-                "left_arm": None,
-                "left_gripper": gripper_result,
-                "right_arm": None,
-                "right_gripper": None,
-            }
+        if num == 0:
+            self.move(self.move_by_displacement(arm_tag=arm_tag, z=0.15, move_axis="arm"))
         else:
-            gripper_result = self.set_gripper(right_pos=1.0, set_tag="right")
-            control_seq = {
-                "left_arm": None,
-                "left_gripper": None,
-                "right_arm": None,
-                "right_gripper": gripper_result,
-            }
-        self._execute_control_seq_for_pos(control_seq)
+            self.move(self.open_gripper(arm_tag=arm_tag))
 
-        return True
+        return self.plan_success
 
-    def _execute_control_seq_for_pos(self, control_seq, save_freq=-1):
-        """Execute control sequence and save frames for positive samples."""
-        left_arm = control_seq.get("left_arm")
-        left_gripper = control_seq.get("left_gripper")
-        right_arm = control_seq.get("right_arm")
-        right_gripper = control_seq.get("right_gripper")
+    def _replay_dual(self, grasp_info):
+        """Dual-arm: grasp -> lift -> place (mirrors remove_dual in play_once)."""
+        bread_idx = grasp_info['bread_idx']
+        other_bread_idx = grasp_info['other_bread_idx']
 
-        save_freq = self.save_freq if save_freq == -1 else save_freq
+        # Dual grasp
+        self.move(
+            self.grasp_actor(self.bread[bread_idx], arm_tag="left", pre_grasp_dis=0.05),
+            self.grasp_actor(self.bread[other_bread_idx], arm_tag="right", pre_grasp_dis=0.07),
+        )
+        if not self.plan_success:
+            return False
 
-        max_control_len = 0
-        if left_arm is not None and "position" in left_arm:
-            max_control_len = max(max_control_len, left_arm["position"].shape[0])
-        if left_gripper is not None:
-            max_control_len = max(max_control_len, left_gripper["num_step"])
-        if right_arm is not None and "position" in right_arm:
-            max_control_len = max(max_control_len, right_arm["position"].shape[0])
-        if right_gripper is not None:
-            max_control_len = max(max_control_len, right_gripper["num_step"])
+        # Lift both
+        self.move(
+            self.move_by_displacement(arm_tag="left", z=0.05, move_axis="arm"),
+            self.move_by_displacement(arm_tag="right", z=0.05, move_axis="arm"),
+        )
+        if not self.plan_success:
+            return False
 
-        for control_idx in range(max_control_len):
-            if left_arm is not None and control_idx < left_arm["position"].shape[0]:
-                self.robot.set_arm_joints(
-                    left_arm["position"][control_idx],
-                    left_arm["velocity"][control_idx],
-                    "left",
-                )
+        # Place left bread
+        breadbasket_pose = self.breadbasket.get_functional_point(0)
+        self.move(self.place_actor(
+            self.bread[bread_idx], arm_tag="left",
+            target_pose=breadbasket_pose, constrain="free", pre_dis=0.13,
+        ))
+        if not self.plan_success:
+            return False
 
-            if left_gripper is not None and control_idx < left_gripper["num_step"]:
-                self.robot.set_gripper(
-                    left_gripper["result"][control_idx],
-                    "left",
-                    left_gripper["per_step"],
-                )
+        # Lift left
+        self.move(self.move_by_displacement(arm_tag="left", z=0.1, move_axis="arm"))
+        if not self.plan_success:
+            return False
 
-            if right_arm is not None and control_idx < right_arm["position"].shape[0]:
-                self.robot.set_arm_joints(
-                    right_arm["position"][control_idx],
-                    right_arm["velocity"][control_idx],
-                    "right",
-                )
-
-            if right_gripper is not None and control_idx < right_gripper["num_step"]:
-                self.robot.set_gripper(
-                    right_gripper["result"][control_idx],
-                    "right",
-                    right_gripper["per_step"],
-                )
-
-            self.scene.step()
-
-            if self.render_freq and control_idx % self.render_freq == 0:
-                self._update_render()
-                if hasattr(self, 'viewer') and self.viewer:
-                    self.viewer.render()
-
-            if save_freq is not None and control_idx % save_freq == 0:
-                self._update_render()
-                self._take_picture()
-
-        if save_freq is not None:
-            self._take_picture()
+        # Retract left, place right
+        self.move(
+            self.back_to_origin(arm_tag="left"),
+            self.place_actor(
+                self.bread[other_bread_idx], arm_tag="right",
+                target_pose=breadbasket_pose, constrain="free", pre_dis=0.13, dis=0.05,
+            ),
+        )
+        return self.plan_success
 
 
 class DataProcessor:
@@ -719,6 +669,7 @@ class DataProcessor:
             cache_path = f"{self.env.save_dir}/.cache/episode{epid}/"
             is_cached = os.path.exists(os.path.join(cache_path, "anchor_0.pkl"))
 
+            #! WARN: cache file would skip play_once
             if is_cached:
                 print(f"Skipping simulation for Episode {epid} (Found cache)")
                 self.env.folder_path = {"cache": cache_path}
@@ -738,9 +689,9 @@ class DataProcessor:
                 # Run anchor trajectory
                 self.env.play_once()
 
-                # Generate positive samples from grasp states
+                # Generate positive samples from pre-grasp states
                 if (self.env.alt_grasp_pos_config.get("active", False) and
-                    self.env.check_success()):
+                        self.env.check_success()):
                     print(f"\n--- Generating Positive Samples ---")
                     n_samples = self.env.alt_grasp_pos_config.get("n_samples", 2)
                     self.env.sample_pos_from_grasp_states(n_samples_per_grasp=n_samples)
@@ -750,7 +701,6 @@ class DataProcessor:
             print(f"Merging to HDF5 for episode {epid}")
             self.env.close_env()
             self.env.merge_pkl_to_hdf5_video()
-            breakpoint()
 
             if not self.env.check_success():
                 print(f"Warning: Episode {epid} did not succeed!")
