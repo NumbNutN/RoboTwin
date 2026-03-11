@@ -5,7 +5,7 @@ import time
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ['DEVICE'] = "cuda"
-os.environ["WANDB_DISABLED"] = "true"
+os.environ["WANDB_DISABLED"] = "false"
 
 import torch
 from policy_heads import *
@@ -103,7 +103,7 @@ def parse_param():
     model_args, data_args, training_args, action_head_args = parser.parse_args_into_dataclasses()
     local_rank = training_args.local_rank
     # print("模型路径：",model_args.model_name_or_path)
-    config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=False, **asdict(action_head_args))
+    config = AutoConfig.from_pretrained(model_args.model_name_or_path, trust_remote_code=True, **asdict(action_head_args))
 
     cond_dim = config.hidden_size
     if  action_head_args.policy_head_type == 'unet_diffusion_policy':

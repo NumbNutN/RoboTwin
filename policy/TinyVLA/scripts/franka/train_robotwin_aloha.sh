@@ -1,10 +1,10 @@
 #!/bin/bash
 LLM=InternVL3
 ACTION_HEAD=unet_diffusion_policy
-TASK=dual_shoes_place
+TASK=stack_blocks_two
 
-ROOT=/data/private/liuza/robotiwin/policy/TInyVLA/TinyVLA-v2
-mnop=/data/private/liuza/robotiwin/policy/TInyVLA/TinyVLA-v2/model_param/InternVL3-1B/
+ROOT=~/RoboTwin/policy/TinyVLA/TinyVLA-v2
+mnop=~/RoboTwin/policy/TinyVLA/TinyVLA-v2/model_param/InternVL3-1B/
 #mnop=/data/private/liuza/robotiwin/policy/TInyVLA/TinyVLA-v2/vla/models/internvl
 BS=64
 LR=2e-5
@@ -54,7 +54,7 @@ deepspeed --master_port 29604 --num_gpus=8 --num_nodes=1 ./train_vla.py \
   --model_max_length 2048 \
   --gradient_checkpointing True \
   --dataloader_num_workers 8 \
-  --report_to tensorboard \
-  --logging_dir $OUTPUT/log | tee $OUTPUT/log.log
+  --report_to wandb \
+  --logging_dir $OUTPUT/log | tee $OUTPUT/log.log   
 
 echo $OUTPUT
