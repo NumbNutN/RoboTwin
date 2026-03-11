@@ -108,7 +108,7 @@ def parse_param():
     cond_dim = config.hidden_size
     if  action_head_args.policy_head_type == 'unet_diffusion_policy':
         config.policy_head_config = AutoConfig.for_model(
-            model_type=config.policy_head_type,
+            model_type=action_head_args.policy_head_type,
             global_cond_dim=cond_dim,
             action_dim=action_head_args.action_dim,
             state_dim=action_head_args.state_dim,

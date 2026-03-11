@@ -6,6 +6,7 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, AutoConfig, Qwen2T
 import warnings
 import os
 from aloha_scripts.utils import *
+from vla.models.internvl.modeling_tinyvla import TinyVLA
 
 
 def find_all_linear_names(model, rank0_print):
@@ -36,7 +37,7 @@ def load_model(config=None, vla_config=None, rank0_print=print):
 
     kwargs = {"device_map": "cuda", "torch_dtype": torch.bfloat16}
     if config['model_args'].flash_attn:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = TinyVLA.from_pretrained(
             config['model_args'].model_name_or_path,
             config=vla_config,
             cache_dir=config['training_args'].cache_dir,
@@ -46,7 +47,7 @@ def load_model(config=None, vla_config=None, rank0_print=print):
             **kwargs
         )
     else:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = TinyVLA.from_pretrained(
             config['model_args'].model_name_or_path,
             config=vla_config,
             cache_dir=config['training_args'].cache_dir,
