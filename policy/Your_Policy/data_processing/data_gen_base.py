@@ -131,6 +131,8 @@ class DataGenBase:
         state = {
             "robot_qpos": robot_qpos,
             "robot_qvel": robot_qvel,
+            "left_gripper_val": self.robot.get_left_gripper_val(),
+            "right_gripper_val": self.robot.get_right_gripper_val(),
         }
 
         # Save task-specific object states (to be extended by subclasses)
@@ -160,6 +162,17 @@ class DataGenBase:
                 np.zeros_like(self.robot.left_entity.get_qvel()))
             self.robot.right_entity.set_qvel(
                 np.zeros_like(self.robot.right_entity.get_qvel()))
+
+        # Restore gripper tracking values + drive targets
+        if "left_gripper_val" in state:
+            self.robot.left_gripper_val = state["left_gripper_val"]
+            self.robot.right_gripper_val = state["right_gripper_val"]
+            # Sync drive targets to match the restored gripper values
+            # Use gripper_eps=1.0 to allow instant jump to target
+            self.robot.set_gripper(
+                state["left_gripper_val"], "left", gripper_eps=1.0)
+            self.robot.set_gripper(
+                state["right_gripper_val"], "right", gripper_eps=1.0)
 
         # Restore task-specific object states
         self._set_task_object_states(state)
