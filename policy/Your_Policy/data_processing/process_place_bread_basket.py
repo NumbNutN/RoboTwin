@@ -76,6 +76,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         }
         self._phase_records = []       # unified per-phase records
         self._phase_state_buffer = []  # rolling buffer for current phase
+        self._sync_anchor_gripper = True   # sync anchor gripper to neg samples
+        self._gripper_val_buffer = []  # gripper values captured alongside buffer
 
     def setup_demo(self, **kwargs):
         super().setup_demo(**kwargs)
@@ -178,6 +180,7 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
 
         self._phase_records.append(record)
         self._phase_state_buffer = []  # reset rolling buffer
+        self._gripper_val_buffer = []  # reset gripper buffer
         print(f"[PlaceBread] Phase '{phase}' started at frame {self.FRAME_IDX}")
 
     def _finalize_phase(self):
@@ -204,17 +207,34 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             rollback_steps = buf_len - idx
             record['pre_end_state'] = self._phase_state_buffer[idx]
             record['pre_end_frame_idx'] = self.FRAME_IDX
+
+            # Save anchor gripper sequence from restore point to end
+            if (self._sync_anchor_gripper
+                    and len(self._gripper_val_buffer) == buf_len):
+                record['anchor_gripper_seq'] = \
+                    self._gripper_val_buffer[idx:]
+            else:
+                record['anchor_gripper_seq'] = None
+
             print(f"[Phase '{record['phase']}'] finalized: "
                   f"total_steps={buf_len}, "
                   f"neg_restore_at=step {idx} "
                   f"(rollback {rollback_steps} steps, "
-                  f"{rollback_steps/buf_len*100:.0f}% of phase)")
+                  f"{rollback_steps/buf_len*100:.0f}% of phase)"
+                  f"{', gripper_seq=' + str(len(record['anchor_gripper_seq'])) + ' steps' if record.get('anchor_gripper_seq') else ''}")
 
         self._phase_state_buffer = []
+        self._gripper_val_buffer = []
 
     def _capture_buffer_state(self):
         """Capture current state into rolling buffer (called each sim step)."""
         self._phase_state_buffer.append(self.get_state())
+        # Also capture gripper values for anchor gripper sync
+        if self._sync_anchor_gripper:
+            self._gripper_val_buffer.append((
+                self.robot.get_left_gripper_val(),
+                self.robot.get_right_gripper_val(),
+            ))
 
     # ==================== Execution Overrides ====================
 
@@ -684,47 +704,158 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             return self._replay_neg_place(record, is_dual, perturbation_idx)
         return False
 
-    def _replay_neg_grasp(self, r, is_dual, pidx):
-        """Negative grasp: approach a PERTURBED grasp pose, then close gripper."""
-        bread_idx = r['bread_idx']
+    def _resample_gripper_seq(self, anchor_seq, target_len, arm_idx):
+        """
+        Resample anchor gripper value sequence to match target trajectory length.
 
-        def _neg_grasp_one_arm(bread_i, arm_tag, pre_dis=0):
-            # Compute original grasp target from contact point
+        Args:
+            anchor_seq: list of (left_val, right_val) tuples from anchor
+            target_len: desired output length
+            arm_idx: 0 for left, 1 for right
+        Returns:
+            np.array of gripper values with length target_len
+        """
+        src = np.array([g[arm_idx] for g in anchor_seq])
+        if len(src) == target_len:
+            return src
+        # Linear interpolation to resample
+        x_src = np.linspace(0, 1, len(src))
+        x_dst = np.linspace(0, 1, target_len)
+        return np.interp(x_dst, x_src, src)
+
+    @staticmethod
+    def _build_gripper_control(gripper_vals, arm_tag):
+        """
+        Build a gripper control_seq dict from a sequence of gripper values.
+
+        Args:
+            gripper_vals: np.array of gripper values [0, 1] per step
+            arm_tag: "left" or "right"
+        Returns:
+            gripper control dict compatible with take_dense_action
+              - per_step is used as gripper_eps in robot.set_gripper()
+              - set to 0.1 (default eps) to avoid clamping artifacts
+        """
+        n = len(gripper_vals)
+        return {
+            "num_step": n,
+            "per_step": 0.1,
+            "result": gripper_vals,
+        }
+
+    def _replay_neg_grasp(self, r, is_dual, pidx):
+        """Negative grasp: approach a PERTURBED grasp pose, then close gripper.
+        When sync_anchor_gripper is enabled, the anchor's gripper sequence is
+        resampled and played alongside the arm trajectory."""
+        bread_idx = r['bread_idx']
+        anchor_grip = r.get('anchor_gripper_seq') \
+            if self._sync_anchor_gripper else None
+
+        def _neg_grasp_one_arm(bread_i, arm_tag):
             grasp_target = self.get_grasp_pose(
                 self.bread[bread_i], arm_tag,
                 contact_point_id=0, pre_dis=0)
             if grasp_target is None:
                 return None
-            # Perturb the target
             perturbed = self._perturb_for_neg(grasp_target, pidx, "grasp")
-            return arm_tag, perturbed
+            return perturbed
 
         if is_dual:
             other = r['other_bread_idx']
-            left_info = _neg_grasp_one_arm(bread_idx, "left", 0.05)
-            right_info = _neg_grasp_one_arm(other, "right", 0.07)
-            if left_info is None or right_info is None:
+            left_target = _neg_grasp_one_arm(bread_idx, "left")
+            right_target = _neg_grasp_one_arm(other, "right")
+            if left_target is None or right_target is None:
                 return False
-            # Plan to perturbed targets
-            self.move(
-                self.move_to_pose("left", left_info[1]),
-                self.move_to_pose("right", right_info[1]))
-            if not self.plan_success:
-                return False
-            # Close both grippers
-            self.move(self.close_gripper(arm_tag="left"))
-            self.move(self.close_gripper(arm_tag="right"))
+
+            if anchor_grip:
+                # Plan arm paths manually
+                left_arm = self.left_move_to_pose(left_target)
+                right_arm = self.right_move_to_pose(right_target)
+                if not self.plan_success:
+                    return False
+                arm_steps = max(
+                    left_arm["position"].shape[0] if left_arm else 0,
+                    right_arm["position"].shape[0] if right_arm else 0)
+                total_steps = max(arm_steps, len(anchor_grip))
+                left_grip_vals = self._resample_gripper_seq(
+                    anchor_grip, total_steps, 0)
+                right_grip_vals = self._resample_gripper_seq(
+                    anchor_grip, total_steps, 1)
+                # Pad arm results to total_steps (hold last position)
+                left_arm = self._pad_arm_result(left_arm, total_steps)
+                right_arm = self._pad_arm_result(right_arm, total_steps)
+                control_seq = {
+                    "left_arm": left_arm,
+                    "right_arm": right_arm,
+                    "left_gripper": self._build_gripper_control(
+                        left_grip_vals, "left"),
+                    "right_gripper": self._build_gripper_control(
+                        right_grip_vals, "right"),
+                }
+                self.take_dense_action(control_seq)
+            else:
+                self.move(
+                    self.move_to_pose("left", left_target),
+                    self.move_to_pose("right", right_target))
+                if not self.plan_success:
+                    return False
+                self.move(self.close_gripper(arm_tag="left"))
+                self.move(self.close_gripper(arm_tag="right"))
         else:
             arm_tag = ArmTag(r['arm_tag'])
-            info = _neg_grasp_one_arm(bread_idx, arm_tag, 0.07)
-            if info is None:
+            target = _neg_grasp_one_arm(bread_idx, arm_tag)
+            if target is None:
                 return False
-            self.move(self.move_to_pose(arm_tag, info[1]))
-            if not self.plan_success:
-                return False
-            self.move(self.close_gripper(arm_tag=arm_tag))
+
+            if anchor_grip:
+                arm_idx = 0 if arm_tag == "left" else 1
+                # Plan arm path
+                if arm_tag == "left":
+                    arm_result = self.left_move_to_pose(target)
+                else:
+                    arm_result = self.right_move_to_pose(target)
+                if not self.plan_success:
+                    return False
+                arm_steps = arm_result["position"].shape[0]
+                total_steps = max(arm_steps, len(anchor_grip))
+                grip_vals = self._resample_gripper_seq(
+                    anchor_grip, total_steps, arm_idx)
+                arm_result = self._pad_arm_result(arm_result, total_steps)
+                control_seq = {
+                    "left_arm": arm_result if arm_tag == "left" else None,
+                    "right_arm": arm_result if arm_tag == "right" else None,
+                    "left_gripper": self._build_gripper_control(
+                        grip_vals, "left") if arm_tag == "left" else None,
+                    "right_gripper": self._build_gripper_control(
+                        grip_vals, "right") if arm_tag == "right" else None,
+                }
+                self.take_dense_action(control_seq)
+            else:
+                self.move(self.move_to_pose(arm_tag, target))
+                if not self.plan_success:
+                    return False
+                self.move(self.close_gripper(arm_tag=arm_tag))
 
         return True
+
+    @staticmethod
+    def _pad_arm_result(arm_result, total_steps):
+        """Pad arm trajectory to total_steps by holding the last position."""
+        if arm_result is None:
+            return None
+        n = arm_result["position"].shape[0]
+        if n >= total_steps:
+            return arm_result
+        pad_len = total_steps - n
+        arm_result["position"] = np.concatenate([
+            arm_result["position"],
+            np.tile(arm_result["position"][-1:], (pad_len, 1))
+        ])
+        arm_result["velocity"] = np.concatenate([
+            arm_result["velocity"],
+            np.zeros((pad_len, arm_result["velocity"].shape[1]))
+        ])
+        return arm_result
 
     def _replay_neg_lift(self, r, is_dual, pidx):
         """Negative lift: wrong displacement (too low, wrong direction, etc.)."""
