@@ -54,24 +54,24 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
     def _init_sampling_config(self):
         self.sampling_config = {
             "grasp": {
-                "pos": {"active": True, "n_samples": 0},
+                "pos": {"active": True, "n_samples": 2},
                 "neg": {"active": True, "n_samples": 2,
-                        "pre_end_steps": 100},
+                        "pre_end_ratio": 0.9},
             },
             "lift": {
                 "pos": {"active": False, "n_samples": 0},
                 "neg": {"active": False, "n_samples": 0,
-                        "pre_end_steps": 30},
+                        "pre_end_ratio": 0.7},
             },
             "place": {
                 "pos": {"active": False, "n_samples": 0},
                 "neg": {"active": False, "n_samples": 0,
-                        "pre_end_steps": 30},
+                        "pre_end_ratio": 0.7},
             },
             "default": {
                 "pos": {"active": False, "n_samples": 0},
                 "neg": {"active": False, "n_samples": 0,
-                        "pre_end_steps": 30},
+                        "pre_end_ratio": 0.7},
             },
         }
         self._phase_records = []       # unified per-phase records
@@ -139,37 +139,38 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
     def _finalize_phase(self):
         """Called at the END of a phase. Saves pre_end_state from buffer."""
         if not self._phase_records:
-            print(f"[DEBUG] _finalize_phase: no phase_records!")
             return
         record = self._phase_records[-1]
         if record['pre_end_state'] is not None:
-            print(f"[DEBUG] _finalize_phase: already finalized for '{record['phase']}'")
             return  # already finalized
 
         neg_cfg = self.sampling_config.get(
             record['phase'], {}).get("neg", {})
-        print(f"[DEBUG] _finalize_phase: phase='{record['phase']}', "
-              f"neg_active={neg_cfg.get('active')}, "
-              f"buffer_len={len(self._phase_state_buffer)}")
-        if neg_cfg.get("active") and self._phase_state_buffer:
-            N = neg_cfg.get("pre_end_steps", self.PRE_END_STEPS)
-            idx = max(0, len(self._phase_state_buffer) - N)
+        buf_len = len(self._phase_state_buffer)
+
+        if neg_cfg.get("active") and buf_len > 0:
+            # Support both ratio and fixed steps
+            if "pre_end_ratio" in neg_cfg:
+                ratio = neg_cfg["pre_end_ratio"]
+                idx = max(0, int(buf_len * (1.0 - ratio)))
+            else:
+                N = neg_cfg.get("pre_end_steps", self.PRE_END_STEPS)
+                idx = max(0, buf_len - N)
+
+            rollback_steps = buf_len - idx
             record['pre_end_state'] = self._phase_state_buffer[idx]
             record['pre_end_frame_idx'] = self.FRAME_IDX
-            print(f"[PlaceBread] Phase '{record['phase']}' ended: "
-                  f"buffer={len(self._phase_state_buffer)}, "
-                  f"saved pre_end at -{min(N, len(self._phase_state_buffer))} steps")
-        else:
-            print(f"[DEBUG] _finalize_phase: SKIPPED saving pre_end_state!")
+            print(f"[Phase '{record['phase']}'] finalized: "
+                  f"total_steps={buf_len}, "
+                  f"neg_restore_at=step {idx} "
+                  f"(rollback {rollback_steps} steps, "
+                  f"{rollback_steps/buf_len*100:.0f}% of phase)")
 
         self._phase_state_buffer = []
 
     def _capture_buffer_state(self):
         """Capture current state into rolling buffer (called each sim step)."""
         self._phase_state_buffer.append(self.get_state())
-        max_size = self.PRE_END_STEPS + 20
-        if len(self._phase_state_buffer) > max_size:
-            self._phase_state_buffer = self._phase_state_buffer[-self.PRE_END_STEPS:]
 
     # ==================== Execution Overrides ====================
 
@@ -429,6 +430,24 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         }
         if len(self.bread) == 2:
             self.info["info"]["{C}"] = f"075_bread/base{self.bread_id[1]}"
+
+        # Summary of phase records
+        if self._phase_records:
+            print(f"\n[play_once] Phase records summary "
+                  f"({len(self._phase_records)} phases):")
+            for r in self._phase_records:
+                has_pos = r['start_state'] is not None
+                has_neg = r['pre_end_state'] is not None
+                pos_cfg = self.sampling_config.get(
+                    r['phase'], {}).get("pos", {})
+                neg_cfg = self.sampling_config.get(
+                    r['phase'], {}).get("neg", {})
+                print(f"  {r['phase']:>6s}: "
+                      f"pos={'ready' if has_pos and pos_cfg.get('active') else 'off':>5s}"
+                      f"(x{pos_cfg.get('n_samples', 0)})  "
+                      f"neg={'ready' if has_neg and neg_cfg.get('active') else 'off':>5s}"
+                      f"(x{neg_cfg.get('n_samples', 0)})")
+
         return self.info
 
     # ==================== Sampling Entry Points ====================
@@ -488,7 +507,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             if not cfg.get("active"):
                 continue
             n = cfg.get("n_samples", 2)
-            print(f"\n--- Pos samples for '{phase}' (x{n}) ---")
+            print(f"\n--- Pos samples for '{phase}' (x{n}) ---"
+                  f"  [restore to frame {record['start_frame_idx']}]")
 
             for i in range(n):
                 self._enter_sampling_mode(
@@ -518,17 +538,28 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             if not cfg.get("active") or record['pre_end_state'] is None:
                 continue
             n = cfg.get("n_samples", 2)
-            print(f"\n--- Neg samples for '{phase}' (x{n}) ---")
+            strategy_names = {
+                "grasp": ["lateral_miss", "depth_overshoot",
+                          "wrong_angle", "height_miss"],
+                "lift": ["insufficient_lift", "move_down",
+                         "lateral_drift+low", "sideways_drift"],
+                "place": ["lateral_miss", "height_offset",
+                          "diagonal_miss", "wrong_orientation"],
+            }
+            pre_end_frame = record.get('pre_end_frame_idx',
+                                       record['start_frame_idx'])
+            print(f"\n--- Neg samples for '{phase}' (x{n}) ---"
+                  f"  [restore to frame {pre_end_frame}]")
 
             for i in range(n):
+                sname = strategy_names.get(phase, ["unknown"])[i % 4]
                 self._enter_sampling_mode(
                     SampleType.NEGATIVE.value,
                     record['pre_end_state'],
-                    record.get('pre_end_frame_idx',
-                               record['start_frame_idx']), i)
+                    pre_end_frame, i)
 
                 ok = self._replay_neg_phase(record, perturbation_idx=i)
-                print(f"  neg[{i}] phase={phase}: "
+                print(f"  neg[{i}] phase={phase} strategy={sname}: "
                       f"{'OK' if ok else 'FAIL'}")
 
         self._exit_sampling_mode(saved)
