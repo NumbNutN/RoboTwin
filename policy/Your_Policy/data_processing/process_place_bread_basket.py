@@ -54,9 +54,9 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
     def _init_sampling_config(self):
         self.sampling_config = {
             "grasp": {
-                "pos": {"active": True, "n_samples": 2},
+                "pos": {"active": True, "n_samples": 0},
                 "neg": {"active": True, "n_samples": 2,
-                        "pre_end_steps": 50},
+                        "pre_end_steps": 100},
             },
             "lift": {
                 "pos": {"active": False, "n_samples": 0},
@@ -139,13 +139,18 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
     def _finalize_phase(self):
         """Called at the END of a phase. Saves pre_end_state from buffer."""
         if not self._phase_records:
+            print(f"[DEBUG] _finalize_phase: no phase_records!")
             return
         record = self._phase_records[-1]
         if record['pre_end_state'] is not None:
+            print(f"[DEBUG] _finalize_phase: already finalized for '{record['phase']}'")
             return  # already finalized
 
         neg_cfg = self.sampling_config.get(
             record['phase'], {}).get("neg", {})
+        print(f"[DEBUG] _finalize_phase: phase='{record['phase']}', "
+              f"neg_active={neg_cfg.get('active')}, "
+              f"buffer_len={len(self._phase_state_buffer)}")
         if neg_cfg.get("active") and self._phase_state_buffer:
             N = neg_cfg.get("pre_end_steps", self.PRE_END_STEPS)
             idx = max(0, len(self._phase_state_buffer) - N)
@@ -154,6 +159,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             print(f"[PlaceBread] Phase '{record['phase']}' ended: "
                   f"buffer={len(self._phase_state_buffer)}, "
                   f"saved pre_end at -{min(N, len(self._phase_state_buffer))} steps")
+        else:
+            print(f"[DEBUG] _finalize_phase: SKIPPED saving pre_end_state!")
 
         self._phase_state_buffer = []
 
@@ -173,8 +180,10 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         """Whether to capture states in rolling buffer."""
         if self.need_plan or self.sample_type != SampleType.ANCHOR.value:
             return False
-        neg_cfg = self.sampling_config.get(
-            self.current_phase, {}).get("neg", {})
+        phase = getattr(self, 'current_phase', None)
+        if phase is None:
+            return False
+        neg_cfg = self.sampling_config.get(phase, {}).get("neg", {})
         return neg_cfg.get("active", False)
 
     def take_dense_action(self, control_seq, save_freq=-1):
@@ -457,7 +466,6 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         self.right_joint_path = saved['rjp']
         self.left_cnt = saved['lcnt']
         self.right_cnt = saved['rcnt']
-        self._phase_records = []
 
     def _save_replay_state(self):
         return {
