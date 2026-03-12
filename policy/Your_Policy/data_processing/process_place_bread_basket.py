@@ -91,11 +91,35 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
 
     # ==================== State Management ====================
 
+    @staticmethod
+    def _get_rigid_body(actor_wrapper):
+        """Get PhysxRigidDynamicComponent from Actor wrapper."""
+        return actor_wrapper.actor.find_component_by_type(
+            sapien.physx.PhysxRigidDynamicComponent)
+
     def _get_task_object_states(self):
-        return {
+        state = {
             "breadbasket_pose": self.breadbasket.get_pose(),
             "bread_poses": [b.get_pose() for b in self.bread],
         }
+        # Save velocities
+        rb = self._get_rigid_body(self.breadbasket)
+        if rb:
+            state["breadbasket_linear_vel"] = rb.get_linear_velocity().copy()
+            state["breadbasket_angular_vel"] = rb.get_angular_velocity().copy()
+        state["bread_linear_vels"] = []
+        state["bread_angular_vels"] = []
+        for b in self.bread:
+            rb = self._get_rigid_body(b)
+            if rb:
+                state["bread_linear_vels"].append(
+                    rb.get_linear_velocity().copy())
+                state["bread_angular_vels"].append(
+                    rb.get_angular_velocity().copy())
+            else:
+                state["bread_linear_vels"].append(np.zeros(3))
+                state["bread_angular_vels"].append(np.zeros(3))
+        return state
 
     def _set_task_object_states(self, state):
         if "breadbasket_pose" in state:
@@ -104,6 +128,26 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
             for i, pose in enumerate(state["bread_poses"]):
                 if i < len(self.bread):
                     self.bread[i].actor.set_pose(pose)
+
+        # Restore velocities
+        rb = self._get_rigid_body(self.breadbasket)
+        if rb:
+            if "breadbasket_linear_vel" in state:
+                rb.set_linear_velocity(state["breadbasket_linear_vel"])
+                rb.set_angular_velocity(state["breadbasket_angular_vel"])
+            else:
+                rb.set_linear_velocity(np.zeros(3))
+                rb.set_angular_velocity(np.zeros(3))
+        for i, b in enumerate(self.bread):
+            rb = self._get_rigid_body(b)
+            if rb:
+                if ("bread_linear_vels" in state
+                        and i < len(state["bread_linear_vels"])):
+                    rb.set_linear_velocity(state["bread_linear_vels"][i])
+                    rb.set_angular_velocity(state["bread_angular_vels"][i])
+                else:
+                    rb.set_linear_velocity(np.zeros(3))
+                    rb.set_angular_velocity(np.zeros(3))
 
     # ==================== Phase Record Helpers ====================
 

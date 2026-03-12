@@ -114,18 +114,23 @@ class DataGenBase:
 
     def get_state(self) -> Dict[str, Any]:
         """
-        Save current simulation state.
+        Save current simulation state (positions + velocities).
 
         Returns:
-            Dict containing robot qpos and relevant object states.
+            Dict containing robot qpos/qvel and relevant object states.
         """
         robot_qpos = np.concatenate([
             self.robot.left_entity.get_qpos(),
             self.robot.right_entity.get_qpos()
         ])
+        robot_qvel = np.concatenate([
+            self.robot.left_entity.get_qvel(),
+            self.robot.right_entity.get_qvel()
+        ])
 
         state = {
             "robot_qpos": robot_qpos,
+            "robot_qvel": robot_qvel,
         }
 
         # Save task-specific object states (to be extended by subclasses)
@@ -135,7 +140,7 @@ class DataGenBase:
 
     def set_state(self, state: Dict[str, Any]):
         """
-        Restore simulation state.
+        Restore simulation state (positions + velocities).
 
         Args:
             state: Dict containing saved state from get_state()
@@ -144,6 +149,17 @@ class DataGenBase:
         n_left = len(self.robot.left_entity.get_qpos())
         self.robot.left_entity.set_qpos(state["robot_qpos"][:n_left])
         self.robot.right_entity.set_qpos(state["robot_qpos"][n_left:])
+
+        if "robot_qvel" in state:
+            n_left_v = len(self.robot.left_entity.get_qvel())
+            self.robot.left_entity.set_qvel(state["robot_qvel"][:n_left_v])
+            self.robot.right_entity.set_qvel(state["robot_qvel"][n_left_v:])
+        else:
+            # Fallback: zero out velocities
+            self.robot.left_entity.set_qvel(
+                np.zeros_like(self.robot.left_entity.get_qvel()))
+            self.robot.right_entity.set_qvel(
+                np.zeros_like(self.robot.right_entity.get_qvel()))
 
         # Restore task-specific object states
         self._set_task_object_states(state)
