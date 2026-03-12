@@ -54,8 +54,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
     def _init_sampling_config(self):
         self.sampling_config = {
             "grasp": {
-                "pos": {"active": True, "n_samples": 2},
-                "neg": {"active": True, "n_samples": 2,
+                "pos": {"active": True, "n_samples": 1},
+                "neg": {"active": True, "n_samples": 3,
                         "pre_end_ratio": 0.9},
             },
             "lift": {
@@ -516,7 +516,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
 
     # ==================== Sampling Entry Points ====================
 
-    def _enter_sampling_mode(self, sample_type, state, frame_idx, sample_idx):
+    def _enter_sampling_mode(self, sample_type, state, frame_idx, sample_idx,
+                             phase="", strategy=""):
         """Common setup before replaying a pos/neg sample."""
         self.set_state(state)
         self.scene.step()
@@ -530,7 +531,9 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
         self.plan_success = True
 
         self.sample_type = sample_type
-        self.branch_idx = frame_idx * 100 + sample_idx
+        self.branch_idx = sample_idx
+        self._sample_phase = phase
+        self._sample_strategy = strategy
         if sample_type == SampleType.POSITIVE.value:
             self.pos_step_idx = 0
         else:
@@ -578,7 +581,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                 self._enter_sampling_mode(
                     SampleType.POSITIVE.value,
                     record['start_state'],
-                    record['start_frame_idx'], i)
+                    record['start_frame_idx'], i,
+                    phase=phase)
 
                 ok = self._replay_phase(record)
                 print(f"  pos[{i}] phase={phase}: "
@@ -620,7 +624,8 @@ class PlaceBreadBasketDataGen(place_bread_basket, DataGenBase):
                 self._enter_sampling_mode(
                     SampleType.NEGATIVE.value,
                     record['pre_end_state'],
-                    pre_end_frame, i)
+                    pre_end_frame, i,
+                    phase=phase, strategy=sname)
 
                 ok = self._replay_neg_phase(record, perturbation_idx=i)
                 print(f"  neg[{i}] phase={phase} strategy={sname}: "
@@ -983,7 +988,7 @@ class DataProcessor:
 
         self.args['task_name'] = self.task_name
         self.args['task_config'] = self.task_config
-        self.args['headless'] = False
+        self.args['headless'] = True
 
         embodiment_type = self.args.get("embodiment", ["aloha"])
         embodiment_config_path = os.path.join(
@@ -1014,7 +1019,7 @@ class DataProcessor:
             self.args["right_robot_file"])
 
         self.args['need_plan'] = False
-        self.args['render_freq'] = 10
+        self.args['render_freq'] = 0
         self.args['save_data'] = True
         self.args['save_freq'] = 10
 

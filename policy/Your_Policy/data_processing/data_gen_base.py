@@ -13,6 +13,7 @@ Usage:
 """
 
 import os
+import json
 import numpy as np
 import pickle
 import h5py
@@ -482,18 +483,22 @@ class DataGenBase:
 
         # Add sampling metadata
         pkl_dic['sample_type'] = self.sample_type
+        pkl_dic['sample_phase'] = getattr(self, '_sample_phase', '')
+        pkl_dic['sample_strategy'] = getattr(self, '_sample_strategy', '')
         pkl_dic['start_qpos'] = (self.start_qpos.tolist()
                                   if self.start_qpos is not None else [])
 
         # Determine filename based on sample type
+        # Format: {type}_{phase}_{branchIdx}_{stepIdx}.pkl
+        phase_tag = getattr(self, '_sample_phase', '') or ''
         if self.sample_type == SampleType.ANCHOR.value:
             filename = f"anchor_{self.FRAME_IDX}.pkl"
             self.FRAME_IDX += 1
         elif self.sample_type == SampleType.NEGATIVE.value:
-            filename = f"neg_branch{self.branch_idx}_{self.neg_step_idx}.pkl"
+            filename = f"neg_{phase_tag}_{self.branch_idx}_{self.neg_step_idx}.pkl"
             self.neg_step_idx += 1
         elif self.sample_type == SampleType.POSITIVE.value:
-            filename = f"pos_branch{self.branch_idx}_{self.pos_step_idx}.pkl"
+            filename = f"pos_{phase_tag}_{self.branch_idx}_{self.pos_step_idx}.pkl"
             self.pos_step_idx += 1
         else:
             filename = f"unknown_{self.FRAME_IDX}.pkl"
@@ -534,25 +539,35 @@ class DataGenBase:
                     anchor_files.append((idx, path))
                 except ValueError:
                     pass
-            elif fname.startswith("pos_branch"):
+            elif fname.startswith("pos_"):
                 try:
-                    parts = fname.replace("pos_branch", "").replace(".pkl", "").split('_')
-                    if len(parts) == 2:
-                        b_idx, step_idx = int(parts[0]), int(parts[1])
-                        if b_idx not in pos_branch_files:
-                            pos_branch_files[b_idx] = []
-                        pos_branch_files[b_idx].append((step_idx, path))
-                except ValueError:
+                    # pos_{phase}_{branchIdx}_{stepIdx}.pkl
+                    base = fname.replace(".pkl", "")
+                    parts = base.split('_')  # ['pos', phase, branchIdx, stepIdx]
+                    if len(parts) >= 4:
+                        phase = parts[1]
+                        b_idx = int(parts[2])
+                        step_idx = int(parts[3])
+                        key = (phase, b_idx)
+                        if key not in pos_branch_files:
+                            pos_branch_files[key] = []
+                        pos_branch_files[key].append((step_idx, path))
+                except (ValueError, IndexError):
                     pass
-            elif fname.startswith("neg_branch"):
+            elif fname.startswith("neg_"):
                 try:
-                    parts = fname.replace("neg_branch", "").replace(".pkl", "").split('_')
-                    if len(parts) == 2:
-                        b_idx, step_idx = int(parts[0]), int(parts[1])
-                        if b_idx not in neg_files:
-                            neg_files[b_idx] = []
-                        neg_files[b_idx].append((step_idx, path))
-                except ValueError:
+                    # neg_{phase}_{branchIdx}_{stepIdx}.pkl
+                    base = fname.replace(".pkl", "")
+                    parts = base.split('_')  # ['neg', phase, branchIdx, stepIdx]
+                    if len(parts) >= 4:
+                        phase = parts[1]
+                        b_idx = int(parts[2])
+                        step_idx = int(parts[3])
+                        key = (phase, b_idx)
+                        if key not in neg_files:
+                            neg_files[key] = []
+                        neg_files[key].append((step_idx, path))
+                except (ValueError, IndexError):
                     pass
 
         # Process anchor trajectory
@@ -576,13 +591,14 @@ class DataGenBase:
         with h5py.File(target_file_path, "w") as f:
             create_hdf5_from_dict(f, full_data)
 
-            # Process branches
+            # Process branches — keys are (phase, branch_idx) tuples
             def process_branches(branch_dict, group_name):
                 if not branch_dict:
                     return
                 grp = f.create_group(group_name)
-                for b_idx in sorted(branch_dict.keys()):
-                    steps = sorted(branch_dict[b_idx], key=lambda x: x[0])
+                for key in sorted(branch_dict.keys()):
+                    phase, b_idx = key
+                    steps = sorted(branch_dict[key], key=lambda x: x[0])
                     step_paths = [x[1] for x in steps]
                     if not step_paths:
                         continue
@@ -593,11 +609,12 @@ class DataGenBase:
                         d = load_pkl_file(pkl_path)
                         append_data_to_structure(b_data, d)
 
-                    subgrp = grp.create_group(f"branch_{b_idx}")
+                    subgrp = grp.create_group(f"{phase}_{b_idx}")
                     create_hdf5_from_dict(subgrp, b_data)
 
                     if 'start_qpos' in first_frame and len(first_frame['start_qpos']) > 0:
                         subgrp.attrs['start_qpos'] = first_frame['start_qpos']
+                    subgrp.attrs['phase'] = phase
 
             process_branches(neg_files, "negative_trajs")
             process_branches(pos_branch_files, "positive_trajs")
@@ -611,8 +628,9 @@ class DataGenBase:
                 print(f"[DataGen] Anchor video saved to {target_video_path}")
 
             # Positive branch videos
-            for b_idx in sorted(pos_branch_files.keys()):
-                steps = sorted(pos_branch_files[b_idx], key=lambda x: x[0])
+            for key in sorted(pos_branch_files.keys()):
+                phase, b_idx = key
+                steps = sorted(pos_branch_files[key], key=lambda x: x[0])
                 step_paths = [x[1] for x in steps]
                 if not step_paths:
                     continue
@@ -623,15 +641,16 @@ class DataGenBase:
                     append_data_to_structure(b_data, d)
                 if "observation" in b_data and "head_camera" in b_data["observation"]:
                     pos_video_path = target_video_path.replace(
-                        ".mp4", f"_pos_branch{b_idx}.mp4"
+                        ".mp4", f"_pos_{phase}_{b_idx}.mp4"
                     )
                     rgb_seq = np.array(b_data["observation"]["head_camera"]["rgb"])
                     images_to_video(rgb_seq, out_path=pos_video_path)
-                    print(f"[DataGen] Positive branch {b_idx} video saved to {pos_video_path}")
+                    print(f"[DataGen] Positive {phase}[{b_idx}] video saved to {pos_video_path}")
 
             # Negative branch videos
-            for b_idx in sorted(neg_files.keys()):
-                steps = sorted(neg_files[b_idx], key=lambda x: x[0])
+            for key in sorted(neg_files.keys()):
+                phase, b_idx = key
+                steps = sorted(neg_files[key], key=lambda x: x[0])
                 step_paths = [x[1] for x in steps]
                 if not step_paths:
                     continue
@@ -642,13 +661,42 @@ class DataGenBase:
                     append_data_to_structure(b_data, d)
                 if "observation" in b_data and "head_camera" in b_data["observation"]:
                     neg_video_path = target_video_path.replace(
-                        ".mp4", f"_neg_branch{b_idx}.mp4"
+                        ".mp4", f"_neg_{phase}_{b_idx}.mp4"
                     )
                     rgb_seq = np.array(b_data["observation"]["head_camera"]["rgb"])
                     images_to_video(rgb_seq, out_path=neg_video_path)
-                    print(f"[DataGen] Negative branch {b_idx} video saved to {neg_video_path}")
+                    print(f"[DataGen] Negative {phase}[{b_idx}] video saved to {neg_video_path}")
         except Exception as e:
             print(f"[DataGen] Error creating video: {e}")
+
+        # Generate metadata JSON
+        metadata = {
+            "episode": self.ep_num,
+            "anchor_frames": len(anchor_files),
+            "hdf5_path": target_file_path,
+            "positive_branches": {},
+            "negative_branches": {},
+        }
+        for key in sorted(pos_branch_files.keys()):
+            phase, b_idx = key
+            label = f"{phase}_{b_idx}"
+            metadata["positive_branches"][label] = {
+                "phase": phase,
+                "branch_idx": b_idx,
+                "n_frames": len(pos_branch_files[key]),
+            }
+        for key in sorted(neg_files.keys()):
+            phase, b_idx = key
+            label = f"{phase}_{b_idx}"
+            metadata["negative_branches"][label] = {
+                "phase": phase,
+                "branch_idx": b_idx,
+                "n_frames": len(neg_files[key]),
+            }
+        meta_path = os.path.join(cache_path, "metadata.json")
+        with open(meta_path, "w") as f:
+            json.dump(metadata, f, indent=2)
+        print(f"[DataGen] Metadata saved to {meta_path}")
 
     # ==================== Helper Methods ====================
 
