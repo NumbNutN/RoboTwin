@@ -1,68 +1,43 @@
-#!/home/lin/software/miniconda3/envs/aloha/bin/python
+#!/usr/bin/python3
 # -- coding: UTF-8
 """
-#!/usr/bin/python3
+PI0 model wrapper that connects to a remote WebSocket inference server.
+
+Server side: uv run scripts/serve_policy.py --policy.config <config> --policy.dir <ckpt_dir> --port 8000
+Client side: This module connects to the server via WebSocket for inference.
 """
-import json
-import sys
-import jax
 import numpy as np
-from openpi.models import model as _model
-from openpi.policies import aloha_policy
-from openpi.policies import policy_config as _policy_config
-from openpi.shared import download
-from openpi.training import config as _config
-from openpi.training import data_loader as _data_loader
-
-import cv2
-from PIL import Image
-
-from openpi.models import model as _model
-from openpi.policies import policy_config as _policy_config
-from openpi.shared import download
-from openpi.training import config as _config
-from openpi.training import data_loader as _data_loader
+from openpi_client import websocket_client_policy
 
 
 class PI0:
 
-    def __init__(self, train_config_name, model_name, checkpoint_id, pi0_step):
+    def __init__(self, train_config_name, model_name, checkpoint_id, pi0_step,
+                 server_host="localhost", server_port=8000):
         self.train_config_name = train_config_name
         self.model_name = model_name
         self.checkpoint_id = checkpoint_id
-
-        specified_path = f"policy/pi0/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}/assets/"
-        entries = os.listdir(specified_path)
-        assets_id = entries[0]
-
-        config = _config.get_config(self.train_config_name)
-        self.policy = _policy_config.create_trained_policy(
-            config,
-            f"policy/pi0/checkpoints/{self.train_config_name}/{self.model_name}/{self.checkpoint_id}",
-            robotwin_repo_id=assets_id,
-            )
-        print("loading model success!")
+        self.pi0_step = pi0_step
         self.img_size = (224, 224)
         self.observation_window = None
-        self.pi0_step = pi0_step
+        self.instruction = None
 
-    # set img_size
+        # Connect to remote inference server
+        print(f"Connecting to inference server at {server_host}:{server_port}...")
+        self.policy = websocket_client_policy.WebsocketClientPolicy(
+            host=server_host, port=server_port
+        )
+        print(f"Connected! Server metadata: {self.policy.get_server_metadata()}")
+
     def set_img_size(self, img_size):
         self.img_size = img_size
 
-    # set language randomly
     def set_language(self, instruction):
         self.instruction = instruction
         print(f"successfully set instruction:{instruction}")
 
-    # Update the observation window buffer
     def update_observation_window(self, img_arr, state):
-        img_front, img_right, img_left, puppet_arm = (
-            img_arr[0],
-            img_arr[1],
-            img_arr[2],
-            state,
-        )
+        img_front, img_right, img_left = img_arr[0], img_arr[1], img_arr[2]
         img_front = np.transpose(img_front, (2, 0, 1))
         img_right = np.transpose(img_right, (2, 0, 1))
         img_left = np.transpose(img_left, (2, 0, 1))

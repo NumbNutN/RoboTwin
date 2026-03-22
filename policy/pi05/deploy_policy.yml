@@ -11,3 +11,7 @@ train_config_name: null
 model_name: null
 checkpoint_id: 30000
 pi0_step: 50
+
+# Remote inference server
+server_host: localhost
+server_port: 8000

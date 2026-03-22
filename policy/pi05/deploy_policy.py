@@ -25,7 +25,10 @@ def encode_obs(observation):
 def get_model(usr_args):
     train_config_name, model_name, checkpoint_id, pi0_step = (usr_args["train_config_name"], usr_args["model_name"],
                                                               usr_args["checkpoint_id"], usr_args["pi0_step"])
-    return PI0(train_config_name, model_name, checkpoint_id, pi0_step)
+    server_host = usr_args.get("server_host", "localhost")
+    server_port = usr_args.get("server_port", 8000)
+    return PI0(train_config_name, model_name, checkpoint_id, pi0_step,
+               server_host=server_host, server_port=server_port)
 
 
 def eval(TASK_ENV, model, observation):
